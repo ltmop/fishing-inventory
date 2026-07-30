@@ -1,0 +1,95 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+/* 品牌色：深海蓝系，呼应渔具/海洋主题 */
+@theme {
+  --color-brand-50: #eff8ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-500: #2563eb;
+  --color-brand-600: #1d4ed8;
+  --color-brand-700: #1e40af;
+  --color-brand-800: #1e3a5f;
+  --color-brand-900: #0f172a;
+
+  /* 三级阴影纵深系统：投影承担前后景分层，不靠描边 */
+  /* L1 默认卡：柔和大半径，让卡片浮出 #e8eef6 蓝灰底 */
+  --shadow-card:
+    0 1px 2px rgb(15 23 42 / 0.05),
+    0 8px 24px -6px rgb(15 23 42 / 0.12);
+  /* L2 悬浮卡：hover 上浮时加深拉长 */
+  --shadow-card-hover:
+    0 2px 4px rgb(15 23 42 / 0.06),
+    0 16px 40px -8px rgb(15 23 42 / 0.18);
+  /* L3 焦点卡：扫码/搜索等 C 位交互激活态，品牌色光晕 */
+  --shadow-focus:
+    0 0 0 4px rgb(37 99 235 / 0.14),
+    0 12px 32px -8px rgb(37 99 235 / 0.28);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  }
+  /* 大字模式：根字号 16px → 18px，全站 rem 字号（含 Tailwind 工具类）整体放大 */
+  html.text-large {
+    font-size: 18px;
+  }
+  /* 桌面端最小宽度 1024px */
+  #root {
+    min-width: 1024px;
+  }
+}

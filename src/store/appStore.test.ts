@@ -1,0 +1,460 @@
+// appStore 浏览器 mock 回退路径的单测（无 Electron 后端时的本地逻辑）
+// 每个用例用独立 fixture 注入 store，不依赖 mock-data 的具体数值
+import { beforeEach, describe, expect, it } from 'vitest'
+import { useAppStore } from './appStore'
+import type { Customer, InventoryBatch, Product, StockTake, StockTakeItem } from '@/types'
+
+const baseProduct: Product = {
+  id: 1,
+  sku_code: 'JC-FG-SG-GW-001',
+  barcode: '6900000000001',
+  category: '鱼竿',
+  sub_category: '手竿',
+  brand: '光威',
+  model: '测试竿 3.6m',
+  cost_price: 4200,
+  suggest_price: 8500,
+  location: 'A区-东墙',
+  photo_path: null,
+  name_vi: null,
+  rod_length: null,
+  line_number: null,
+  hook_size: null,
+  color: null,
+  material: null,
+  rod_action: null,
+  power_rating: null,
+  expiry_date: null,
+  status: '已盘点',
+  created_at: '2026-07-01T00:00:00.000Z',
+  updated_at: '2026-07-01T00:00:00.000Z',
+}
+
+// 两个批次：先入 3 条 @40元，后入 5 条 @45元（FIFO 必须先扣 id=1）
+const baseBatches: InventoryBatch[] = [
+  { id: 1, product_id: 1, batch_no: 'PO20260701-001', quantity: 3, cost_price: 4000, location: 'A区-东墙', inbound_date: '2026-07-01', supplier_id: null },
+  { id: 2, product_id: 1, batch_no: 'PO20260710-001', quantity: 5, cost_price: 4500, location: 'A区-东墙', inbound_date: '2026-07-10', supplier_id: null },
+]
+
+function seed(overrides: Partial<Parameters<typeof useAppStore.setState>[0]> = {}) {
+  useAppStore.setState({
+    products: [structuredClone(baseProduct)],
+    batches: structuredClone(baseBatches),
+    transactions: [],
+    suppliers: [],
+    stockTakes: [],
+    stockTakeItems: [],
+    customers: [],
+    payments: [],
+    purchaseOrders: [],
+    purchaseOrderItems: [],
+    priceTiers: [],
+    loaded: true,
+    error: null,
+    ...overrides,
+  })
+}
+
+beforeEach(() => seed())
+
+describe('addInbound（mock 路径）', () => {
+  it('追加批次和入库流水，并刷新商品最新进价', async () => {
+    await useAppStore.getState().addInbound({
+      productId: 1, quantity: 10, costPrice: 5000,
+      location: 'A区-东墙', supplierId: null, operator: '测试员',
+    })
+    const s = useAppStore.getState()
+    expect(s.batches).toHaveLength(3)
+    const nb = s.batches[2]
+    expect(nb.quantity).toBe(10)
+    expect(nb.cost_price).toBe(5000)
+    expect(nb.batch_no).toMatch(/^PO\d{8}-\d{3}$/)
+    const tx = s.transactions[0]
+    expect(tx.type).toBe('in')
+    expect(tx.unit_price).toBe(5000)
+    expect(tx.batch_id).toBe(nb.id)
+    expect(s.products[0].cost_price).toBe(5000)
+  })
+})
+
+describe('confirmOutbound（mock 路径 FIFO）', () => {
+  it('跨批次扣减：先扣完整最早批次，再扣次早批次', async () => {
+    const r = await useAppStore.getState().confirmOutbound(1, 4, 8000, '测试员')
+    expect(r.ok).toBe(true)
+    const s = useAppStore.getState()
+    expect(s.batches.find((b) => b.id === 1)!.quantity).toBe(0)
+    expect(s.batches.find((b) => b.id === 2)!.quantity).toBe(4)
+    const outs = s.transactions.filter((t) => t.type === 'out')
+    expect(outs).toHaveLength(2)
+    // unit_price = 批次成本价，selling_price = 实际售价
+    const byBatch = new Map(outs.map((t) => [t.batch_id, t]))
+    expect(byBatch.get(1)!.quantity).toBe(3)
+    expect(byBatch.get(1)!.unit_price).toBe(4000)
+    expect(byBatch.get(1)!.selling_price).toBe(8000)
+    expect(byBatch.get(2)!.quantity).toBe(1)
+    expect(byBatch.get(2)!.unit_price).toBe(4500)
+  })
+
+  it('不填售价时 selling_price 为 null（显示层兜底为 -）', async () => {
+    await useAppStore.getState().confirmOutbound(1, 1, null, '测试员')
+    const tx = useAppStore.getState().transactions.find((t) => t.type === 'out')!
+    expect(tx.selling_price).toBeNull()
+    expect(tx.unit_price).toBe(4000)
+  })
+
+  it('库存不足返回 shortage 且不改动任何状态', async () => {
+    const before = useAppStore.getState()
+    const r = await useAppStore.getState().confirmOutbound(1, 99, 8000, '测试员')
+    expect(r).toEqual({ ok: false, shortage: 91 })
+    const after = useAppStore.getState()
+    expect(after.batches).toEqual(before.batches)
+    expect(after.transactions).toHaveLength(0)
+  })
+})
+
+describe('addProduct（mock 路径 SKU 自动生成）', () => {
+  const input = {
+    sku_code: '',
+    barcode: null,
+    category: '鱼竿' as const,
+    sub_category: '手竿',
+    brand: '光威',
+    model: '新竿',
+    cost_price: 1000,
+    suggest_price: null,
+    location: null,
+    status: '待盘点' as const,
+  }
+
+  it('sku_code 留空无条码时自动编纯数字号（1001 起递增）', async () => {
+    // 规则与后端一致：显式 SKU > 条码 > 纯数字编号（6 位以内纯数字取 max+1）
+    const p1 = await useAppStore.getState().addProduct(input)
+    expect(p1.sku_code).toBe('1001')
+    const p2 = await useAppStore.getState().addProduct(input)
+    expect(p2.sku_code).toBe('1002')
+  })
+
+  it('sku_code 留空有条码时直接用条码，且条码不占数字编号序列', async () => {
+    const p1 = await useAppStore.getState().addProduct({ ...input, barcode: '6901234567890' })
+    expect(p1.sku_code).toBe('6901234567890')
+    const p2 = await useAppStore.getState().addProduct(input)
+    expect(p2.sku_code).toBe('1001')
+    await expect(useAppStore.getState().addProduct({ ...input, barcode: '6901234567890' })).rejects.toThrow('条码')
+  })
+
+  it('显式传入 sku_code 时原样保留', async () => {
+    const p = await useAppStore.getState().addProduct({ ...input, sku_code: 'JC-QT-XX-XX-999' })
+    expect(p.sku_code).toBe('JC-QT-XX-XX-999')
+  })
+})
+
+describe('updateProduct / deleteProduct（mock 路径）', () => {
+  it('updateProduct 可改资料但 SKU 不可变', async () => {
+    await useAppStore.getState().updateProduct(1, { model: '改名竿', sku_code: 'HACK' } as never)
+    const p = useAppStore.getState().products[0]
+    expect(p.model).toBe('改名竿')
+    expect(p.sku_code).toBe('JC-FG-SG-GW-001')
+  })
+
+  it('deleteProduct 无记录商品可删，有批次/流水的拒绝', async () => {
+    await expect(useAppStore.getState().deleteProduct(1)).rejects.toThrow('停产')
+    seed({ batches: [], transactions: [] })
+    await useAppStore.getState().deleteProduct(1)
+    expect(useAppStore.getState().products).toHaveLength(0)
+  })
+})
+
+describe('completeStockTake（mock 路径）', () => {
+  it('按实盘数落实批次库存并完结盘点单', async () => {
+    const take: StockTake = {
+      id: 1, take_no: 'ST20260728-001', status: '进行中',
+      location_filter: null, started_at: '2026-07-28T10:00:00.000Z', completed_at: null, operator: '测试员',
+    }
+    const items: StockTakeItem[] = [
+      { id: 1, stock_take_id: 1, product_id: 1, batch_id: 1, system_qty: 3, actual_qty: 2, difference: -1, reason: '损耗' },
+      { id: 2, stock_take_id: 1, product_id: 1, batch_id: 2, system_qty: 5, actual_qty: null, difference: null, reason: '' },
+    ]
+    seed({ stockTakes: [take], stockTakeItems: items })
+    await useAppStore.getState().completeStockTake(1)
+    const s = useAppStore.getState()
+    expect(s.batches.find((b) => b.id === 1)!.quantity).toBe(2)
+    // 未填实盘数的批次不动
+    expect(s.batches.find((b) => b.id === 2)!.quantity).toBe(5)
+    const t = s.stockTakes[0]
+    expect(t.status).toBe('已完成')
+    expect(t.completed_at).toBeTruthy()
+  })
+})
+
+describe('submitStockTake（mock 路径，原子提交）', () => {
+  it('一次调用完成实盘写入 + 批次落实 + 完结', async () => {
+    const take: StockTake = {
+      id: 1, take_no: 'ST20260728-002', status: '进行中',
+      location_filter: null, started_at: '2026-07-28T10:00:00.000Z', completed_at: null, operator: '测试员',
+    }
+    const items: StockTakeItem[] = [
+      { id: 1, stock_take_id: 1, product_id: 1, batch_id: 1, system_qty: 3, actual_qty: null, difference: null, reason: '' },
+      { id: 2, stock_take_id: 1, product_id: 1, batch_id: 2, system_qty: 5, actual_qty: null, difference: null, reason: '' },
+    ]
+    seed({ stockTakes: [take], stockTakeItems: items })
+    await useAppStore.getState().submitStockTake(1, [
+      { itemId: 1, actualQty: 2, reason: '损耗' },
+      { itemId: 2, actualQty: 7, reason: '漏记' },
+    ])
+    const s = useAppStore.getState()
+    expect(s.stockTakeItems[0].actual_qty).toBe(2)
+    expect(s.stockTakeItems[0].difference).toBe(-1)
+    expect(s.stockTakeItems[1].actual_qty).toBe(7)
+    expect(s.batches.find((b) => b.id === 1)!.quantity).toBe(2)
+    expect(s.batches.find((b) => b.id === 2)!.quantity).toBe(7)
+    expect(s.stockTakes[0].status).toBe('已完成')
+  })
+})
+
+describe('addReturn（mock 路径）', () => {
+  it('退货加回最近批次并记 return 流水', async () => {
+    await useAppStore.getState().addReturn(1, 2, 8000, '测试员')
+    const s = useAppStore.getState()
+    // 最近批次是 id=2（入库日期更晚）
+    expect(s.batches.find((b) => b.id === 2)!.quantity).toBe(7)
+    expect(s.batches.find((b) => b.id === 1)!.quantity).toBe(3)
+    const tx = s.transactions[0]
+    expect(tx.type).toBe('return')
+    expect(tx.batch_id).toBe(2)
+    expect(tx.unit_price).toBe(4500) // 最近批次的成本
+    expect(tx.selling_price).toBe(8000) // 退款金额
+    expect(tx.notes).toBe('退货回补')
+  })
+
+  it('无批次商品退货自动建批次，成本取商品最近进价', async () => {
+    seed({ batches: [] })
+    await useAppStore.getState().addReturn(1, 1, 5000, '测试员')
+    const s = useAppStore.getState()
+    expect(s.batches).toHaveLength(1)
+    expect(s.batches[0].quantity).toBe(1)
+    expect(s.batches[0].cost_price).toBe(4200) // 商品 cost_price
+    expect(s.transactions[0].type).toBe('return')
+  })
+
+  it('商品不存在时抛错', async () => {
+    await expect(useAppStore.getState().addReturn(999, 1, 100, '测试员')).rejects.toThrow('商品不存在')
+  })
+})
+
+// ---------- 赊账包（mock 回退路径） ----------
+const baseCustomer: Customer = {
+  id: 1,
+  name: '老王',
+  phone: '13800000000',
+  notes: null,
+  created_at: '2026-07-01T00:00:00.000Z',
+}
+
+describe('赊账出库（mock 路径）', () => {
+  it('先欠着：paid_amount=0，客户欠款=应付总额', async () => {
+    seed({ customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }] })
+    const r = await useAppStore.getState().confirmOutbound(1, 2, 8000, '测试员', { customerId: 1, paidAmount: 0 })
+    expect(r.ok).toBe(true)
+    const s = useAppStore.getState()
+    const outs = s.transactions.filter((t) => t.type === 'out')
+    expect(outs.every((t) => t.customer_id === 1 && t.paid_amount === 0)).toBe(true)
+    const cust = s.customers.find((c) => c.id === 1)!
+    expect(cust.outstanding).toBe(16000)
+    expect(cust.total_credit).toBe(16000)
+  })
+
+  it('付一部分：实收按批次行摊销，欠款=应付-实收', async () => {
+    seed({ customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }] })
+    // 跨批次出 4 条 @80元，应付 320，先付 200
+    await useAppStore.getState().confirmOutbound(1, 4, 8000, '测试员', { customerId: 1, paidAmount: 20000 })
+    const s = useAppStore.getState()
+    const outs = s.transactions.filter((t) => t.type === 'out')
+    const paidSum = outs.reduce((sum, t) => sum + (t.paid_amount ?? 0), 0)
+    expect(paidSum).toBe(20000)
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(12000)
+  })
+
+  it('散客部分付款被拒：赊账必须选客户', async () => {
+    await expect(
+      useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员', { paidAmount: 100 }),
+    ).rejects.toThrow('赊账必须选客户')
+  })
+
+  it('全额收款：paid_amount 保持 null（全额付清），不欠钱', async () => {
+    seed({ customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }] })
+    await useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员', { customerId: 1 })
+    const s = useAppStore.getState()
+    expect(s.transactions[0].paid_amount).toBeNull()
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(0)
+  })
+})
+
+describe('还账 / 赊账退货冲减（mock 路径）', () => {
+  async function seedWithDebt() {
+    seed({ customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }] })
+    await useAppStore.getState().confirmOutbound(1, 2, 8000, '测试员', { customerId: 1, paidAmount: 0 })
+  }
+
+  it('还账后欠款减少，多还变预收', async () => {
+    await seedWithDebt()
+    const r1 = await useAppStore.getState().recordPayment({ customerId: 1, amount: 6000, method: '现金' })
+    expect(r1.outstanding).toBe(10000)
+    const r2 = await useAppStore.getState().recordPayment({ customerId: 1, amount: 12000, method: '微信' })
+    expect(r2.outstanding).toBe(-2000)
+    expect(r2.prepaid).toBe(true)
+    expect(r2.overpaid).toBe(true)
+    expect(useAppStore.getState().payments).toHaveLength(2)
+  })
+
+  it('赊账销售的退货传 customerId，欠款被冲减', async () => {
+    await seedWithDebt()
+    await useAppStore.getState().addReturn(1, 1, 8000, '测试员', 1)
+    const s = useAppStore.getState()
+    const ret = s.transactions.find((t) => t.type === 'return')!
+    expect(ret.customer_id).toBe(1)
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(8000)
+  })
+
+  it('对账单：赊销明细（应付/已付/欠）+ 还款记录', async () => {
+    await seedWithDebt()
+    await useAppStore.getState().recordPayment({ customerId: 1, amount: 6000, method: '现金' })
+    const st = await useAppStore.getState().customerStatement(1)
+    expect(st.customer.name).toBe('老王')
+    expect(st.sales.length).toBeGreaterThan(0)
+    const owedSum = st.sales.reduce((sum, x) => sum + x.owed, 0)
+    expect(owedSum).toBe(16000)
+    expect(st.payments).toHaveLength(1)
+    expect(st.outstanding).toBe(10000)
+  })
+
+  it('有流水/还款记录的客户不能删除', async () => {
+    await seedWithDebt()
+    await expect(useAppStore.getState().deleteCustomer(1)).rejects.toThrow('不能删除')
+  })
+})
+
+describe('createStockTake 品类/供应商筛选（mock 路径）', () => {
+  it('按品类筛选只生成该品类明细，盘点单记下筛选条件', async () => {
+    const take = await useAppStore.getState().createStockTake(null, '测试员', { category: '鱼线' })
+    expect(take.category_filter).toBe('鱼线')
+    const items = useAppStore.getState().stockTakeItems.filter((it) => it.stock_take_id === take.id)
+    expect(items).toHaveLength(0) // fixture 里只有鱼竿
+  })
+
+  it('不筛选时生成全部有库存批次明细', async () => {
+    const take = await useAppStore.getState().createStockTake(null, '测试员')
+    const items = useAppStore.getState().stockTakeItems.filter((it) => it.stock_take_id === take.id)
+    expect(items).toHaveLength(2)
+  })
+})
+
+// ---------- 采购订单 + 多级定价（mock 回退路径） ----------
+
+describe('采购订单（mock 路径）', () => {
+  it('建单：生成单号、明细，状态为待收货，总金额自动算', async () => {
+    const po = await useAppStore.getState().createPurchaseOrder({
+      supplierId: 1,
+      items: [{ productId: 1, quantity: 10, costPrice: 4200 }],
+      notes: '测试订货',
+    })
+    expect(po.po_no).toMatch(/^PO\d{8}-\d{3}$/)
+    const s = useAppStore.getState()
+    const order = s.purchaseOrders.find((o) => o.id === po.id)!
+    expect(order.status).toBe('sent')
+    expect(order.total_cost).toBe(42000)
+    expect(order.total_qty).toBe(10)
+    expect(order.received_qty).toBe(0)
+    const items = s.purchaseOrderItems.filter((it) => it.po_id === po.id)
+    expect(items).toHaveLength(1)
+    expect(items[0].product_name).toContain('光威')
+  })
+
+  it('分批收货：建批次加库存、推进度，收齐后状态变已完成', async () => {
+    const before = useAppStore.getState().totalStockOf(1)
+    const po = await useAppStore.getState().createPurchaseOrder({
+      supplierId: 1,
+      items: [{ productId: 1, quantity: 10, costPrice: 4200 }],
+    })
+    const itemId = useAppStore.getState().purchaseOrderItems.find((it) => it.po_id === po.id)!.id
+
+    // 先收 4 件：部分收货，库存 +4，批次成本用订单进价
+    const r1 = await useAppStore.getState().receivePurchaseOrder(po.id, [
+      { itemId, quantity: 4 },
+    ])
+    expect(r1.receivedTotal).toBe(4)
+    let s = useAppStore.getState()
+    expect(s.purchaseOrders.find((o) => o.id === po.id)!.status).toBe('partial')
+    expect(s.totalStockOf(1)).toBe(before + 4)
+    const batch = s.batches.find((b) => b.batch_no === po.po_no)!
+    expect(batch.cost_price).toBe(4200)
+    expect(s.transactions.some((t) => t.type === 'in' && t.notes === `采购收货 ${po.po_no}`)).toBe(
+      true,
+    )
+
+    // 再收剩余 6 件：收齐变已完成
+    await useAppStore.getState().receivePurchaseOrder(po.id, [{ itemId, quantity: 6 }])
+    s = useAppStore.getState()
+    expect(s.purchaseOrders.find((o) => o.id === po.id)!.status).toBe('complete')
+    expect(s.totalStockOf(1)).toBe(before + 10)
+  })
+
+  it('收货不能超过待收数量', async () => {
+    const po = await useAppStore.getState().createPurchaseOrder({
+      supplierId: 1,
+      items: [{ productId: 1, quantity: 5, costPrice: 4200 }],
+    })
+    const itemId = useAppStore.getState().purchaseOrderItems.find((it) => it.po_id === po.id)!.id
+    await expect(
+      useAppStore.getState().receivePurchaseOrder(po.id, [{ itemId, quantity: 6 }]),
+    ).rejects.toThrow('最多还能收 5 件')
+  })
+
+  it('取消订单：已收保留、状态变已取消，取消后不能再收货', async () => {
+    const po = await useAppStore.getState().createPurchaseOrder({
+      supplierId: 1,
+      items: [{ productId: 1, quantity: 5, costPrice: 4200 }],
+    })
+    await useAppStore.getState().cancelPurchaseOrder(po.id)
+    expect(useAppStore.getState().purchaseOrders.find((o) => o.id === po.id)!.status).toBe(
+      'cancelled',
+    )
+    const itemId = useAppStore.getState().purchaseOrderItems.find((it) => it.po_id === po.id)!.id
+    await expect(
+      useAppStore.getState().receivePurchaseOrder(po.id, [{ itemId, quantity: 1 }]),
+    ).rejects.toThrow('不能再收货')
+  })
+
+  it('详情：本地拼出订单头 + 明细', async () => {
+    const po = await useAppStore.getState().createPurchaseOrder({
+      supplierId: 1,
+      items: [{ productId: 1, quantity: 2, costPrice: 4200 }],
+    })
+    const d = await useAppStore.getState().purchaseOrderDetail(po.id)
+    expect(d.order.po_no).toBe(po.po_no)
+    expect(d.items).toHaveLength(1)
+    expect(d.items[0].quantity).toBe(2)
+  })
+})
+
+describe('价格档次（mock 路径）', () => {
+  it('设置/覆盖/删除某商品某档价格', async () => {
+    await useAppStore.getState().setPriceTier(1, 'wholesale', 7200)
+    let s = useAppStore.getState()
+    expect(s.priceTiers.find((t) => t.product_id === 1 && t.tier === 'wholesale')!.price).toBe(
+      7200,
+    )
+    await useAppStore.getState().setPriceTier(1, 'wholesale', 7000)
+    s = useAppStore.getState()
+    expect(s.priceTiers.filter((t) => t.product_id === 1 && t.tier === 'wholesale')).toHaveLength(
+      1,
+    )
+    expect(s.priceTiers.find((t) => t.product_id === 1 && t.tier === 'wholesale')!.price).toBe(
+      7000,
+    )
+    await useAppStore.getState().deletePriceTier(1, 'wholesale')
+    s = useAppStore.getState()
+    expect(
+      s.priceTiers.some((t) => t.product_id === 1 && t.tier === 'wholesale'),
+    ).toBe(false)
+  })
+})

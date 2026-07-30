@@ -1,0 +1,86 @@
+// preload：contextIsolation 下的最小桥接面，channel 白名单防任意调用
+const { contextBridge, ipcRenderer } = require('electron')
+
+const CHANNELS = new Set([
+  'data:loadAll',
+  'product:create',
+  'product:update',
+  'product:delete',
+  'inbound:create',
+  'outbound:confirm',
+  'outbound:return',
+  'outbound:exchange',
+  'supplier:create',
+  'supplier:update',
+  'supplier:delete',
+  'stocktake:create',
+  'stocktake:updateItem',
+  'stocktake:complete',
+  'stocktake:submit',
+  'import:batch',
+  'customer:create',
+  'customer:update',
+  'customer:delete',
+  'customer:list',
+  'customer:statement',
+  'payment:record',
+  'po:create',
+  'po:list',
+  'po:detail',
+  'po:receive',
+  'po:cancel',
+  'priceTier:set',
+  'priceTier:delete',
+  'priceTier:list',
+  'backup:now',
+  'backup:restore',
+  'ai:status',
+  'ai:setKey',
+  'ai:clearKey',
+  'ai:test',
+  'ai:dailySummary',
+  'ai:chat',
+  'ai:parseInboundNote',
+  'ai:transcribe',
+  'ai:history',
+  'ai:insights',
+  'voice:status',
+  'voice:transcribe',
+  'voice:download',
+  'tts:status',
+  'tts:speak',
+  'tts:download',
+  'kws:status',
+  'kws:download',
+  'kws:push',
+  'kws:reset',
+  'app:openExternal',
+  'app:info',
+  'feedback:send',
+  'server:status',
+  'server:toggle',
+  'server:regenerateToken',
+])
+
+contextBridge.exposeInMainWorld('fi', {
+  invoke(channel, payload) {
+    if (!CHANNELS.has(channel)) return Promise.reject(new Error(`未知通道: ${channel}`))
+    return ipcRenderer.invoke(channel, payload)
+  },
+  // 订阅模型下载进度（voice:download / tts:download / kws:download 触发），返回取消订阅函数
+  onVoiceProgress(callback) {
+    const listener = (_e, data) => callback(data)
+    ipcRenderer.on('voice:progress', listener)
+    return () => ipcRenderer.removeListener('voice:progress', listener)
+  },
+  onTtsProgress(callback) {
+    const listener = (_e, data) => callback(data)
+    ipcRenderer.on('tts:progress', listener)
+    return () => ipcRenderer.removeListener('tts:progress', listener)
+  },
+  onKwsProgress(callback) {
+    const listener = (_e, data) => callback(data)
+    ipcRenderer.on('kws:progress', listener)
+    return () => ipcRenderer.removeListener('kws:progress', listener)
+  },
+})
