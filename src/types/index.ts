@@ -86,6 +86,8 @@ export interface Product {
   rod_action: string | null
   power_rating: string | null
   expiry_date: string | null
+  /** 最低库存预警线：NULL=用默认阈值 5；设了按各自阈值预警（COALESCE(min_stock, 5)） */
+  min_stock: number | null
   status: ProductStatus
   created_at: string
   updated_at: string
@@ -292,4 +294,63 @@ export interface StockTakeItem {
   actual_qty: number | null
   difference: number | null
   reason: string
+}
+
+// ---------- 过期预警 / 操作日志 / 供应商对账 / 备份状态 ----------
+
+/** 临期/过期商品（product:expiring 返回）：daysLeft 为负即已过期 */
+export interface ExpiringProduct {
+  id: number
+  name: string
+  sku: string
+  expiry_date: string
+  daysLeft: number
+  expired: boolean
+  stock: number
+}
+
+/** 操作日志行（audit:list 返回） */
+export interface AuditLogEntry {
+  id: number
+  action: string // 入库/出库/退货/换货/盘点/改价/删商品/新建商品/改商品/新建客户/还账/采购收货
+  entity: string | null // 对象描述，如"光威 赤刃 3.6m x2"
+  detail: string | null // 关键数据 JSON 或一句话
+  operator: string | null
+  created_at: string
+}
+
+/** 供应商对账明细行（supplier:statement 的 lines 元素） */
+export interface SupplierStatementLine {
+  batch_id: number
+  batch_no: string
+  date: string // 入库日期 YYYY-MM-DD
+  product_id: number
+  product_name: string
+  sku: string
+  quantity: number // 进货数量（入库流水口径）
+  remaining: number // 批次当前剩余
+  cost_price: number // 单位：分
+  amount: number // 进货金额 = quantity × cost_price，单位：分
+  po_no: string | null // 关联采购单号（采购收货入库的才有）
+}
+
+/** 供应商对账单（supplier:statement 返回） */
+export interface SupplierStatement {
+  supplier: Supplier
+  lines: SupplierStatementLine[]
+  totalAmount: number // 总进货金额，单位：分
+  totalQty: number // 总进货件数
+  lastInboundAt: string | null // 最近一次进货日期
+  pendingPoAmount: number // 待收采购单金额（sent/partial 的未收部分），单位：分
+}
+
+/** 备份状态（backup:status 返回）：stale=true 表示超过 3 天没备份，前端提醒 */
+export interface BackupStatus {
+  lastBackupAt: string | null
+  backupCount: number
+  extraDir: string | null // 第二备份位置（未配置为 null）
+  extraDirOk: boolean | null // 第二位置可写性（未配置为 null）
+  extraError: string | null // 最近一次向第二位置复制的失败信息
+  dbPath: string
+  stale: boolean
 }

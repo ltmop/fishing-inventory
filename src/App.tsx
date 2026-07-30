@@ -11,6 +11,7 @@ import { StockTakePage } from '@/pages/StockTakePage'
 import { PurchasePage } from '@/pages/PurchasePage'
 import { SuppliersPage } from '@/pages/SuppliersPage'
 import { CustomersPage } from '@/pages/CustomersPage'
+import { AuditLogPage } from '@/pages/AuditLogPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ImportPage } from '@/pages/ImportPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
@@ -18,6 +19,7 @@ import { ReportsPage } from '@/pages/ReportsPage'
 import { computeCustomerStats, useAppStore } from '@/store/appStore'
 import { backend } from '@/lib/api'
 import {
+  mockAuditLogs,
   mockBatches,
   mockCustomers,
   mockPayments,
@@ -60,6 +62,7 @@ function App() {
         purchaseOrders: mockPurchaseOrders,
         purchaseOrderItems: mockPurchaseOrderItems,
         priceTiers: mockPriceTiers,
+        auditLogs: mockAuditLogs,
         loaded: true,
       })
     }
@@ -91,6 +94,7 @@ function App() {
             <Route path="purchase" element={<PurchasePage />} />
             <Route path="suppliers" element={<SuppliersPage />} />
             <Route path="customers" element={<CustomersPage />} />
+            <Route path="audit" element={<AuditLogPage />} />
             <Route path="import" element={<ImportPage />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="*" element={<NotFoundPage />} />

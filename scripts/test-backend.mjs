@@ -5,13 +5,18 @@
 //       / 采购订单（建单→部分收货→收齐完成/取消/超订拒绝/原子性）/ 多级定价（档次价设删查 + 出库接入）
 //       / 客户价格档（建改查/非法拒绝/老库迁移）/ 换货差价（补差价/退差价/赊账口径/原子性）
 //       / 手机写接口（POST /api/outbound 全链路 + 安全加固 + 只读端点不回退）
+//       / 备份增强（backupStatus/第二位置复制/失败降级/stale 判定）
+//       / 过期预警（临期/已过期/零库存不出现/无保质期不出现/YYYY-MM 写法）
+//       / 分级库存预警（min_stock 设改清/NULL 回退默认阈值/低库存口径/老库迁移）
+//       / 操作日志（各写命令埋点/同事务回滚/查询筛选）
+//       / 供应商对账（明细+汇总+待收采购单金额）/ 手机端 /api/audit 与 /api/supplier-statement
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { openDatabase, finalCheckpoint } from '../electron/db.js'
 import * as cmd from '../electron/commands.js'
-import { backupNow, restoreBackup } from '../electron/backup.js'
+import { backupNow, restoreBackup, backupStatus, saveBackupExtraDir, loadBackupConfig } from '../electron/backup.js'
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fi-test-'))
 const dbPath = path.join(tmp, 'data.db')
@@ -1550,6 +1555,286 @@ xdb.close()
   await srvW2.stop()
   wdb.close()
 }
+
+// 26. 备份增强：backupStatus / 第二位置复制 / 失败降级 / stale 判定
+{
+  const bkDbPath = path.join(tmp, 'bk.db')
+  const bkDb = openDatabase(bkDbPath)
+  const bkMain = path.join(tmp, 'bk-main')
+  const bkExtra = path.join(tmp, 'bk-extra')
+  const bkCfg = path.join(tmp, 'bk-config', 'backup-config.json')
+
+  // 配了第二位置：同一份备份复制过去，两边文件名一致、大小一致
+  const bk1 = backupNow(bkDb, bkDbPath, bkMain, bkExtra)
+  ok('主备份目录生成备份文件', fs.existsSync(bk1))
+  const extraFiles = fs.readdirSync(bkExtra)
+  ok('第二位置复制同一份备份',
+    extraFiles.length === 1 &&
+    fs.statSync(path.join(bkExtra, extraFiles[0])).size === fs.statSync(bk1).size)
+
+  // 状态接口：读目录文件列表得出最近备份时间与份数
+  saveBackupExtraDir(bkCfg, bkExtra)
+  const st1 = backupStatus({ dbPath: bkDbPath, backupDir: bkMain, configPath: bkCfg })
+  ok('backupStatus 返回最近备份时间与份数', st1.backupCount === 1 && typeof st1.lastBackupAt === 'string')
+  ok('backupStatus 返回 extraDir 且目录可写', st1.extraDir === bkExtra && st1.extraDirOk === true)
+  ok('刚备份过 stale 为 false', st1.stale === false)
+  ok('backupStatus 带 dbPath', st1.dbPath === bkDbPath)
+
+  // 失败降级：第二位置不可写（拿文件当目录）时主备份照常成功，错误记状态
+  fs.writeFileSync(path.join(tmp, 'bk-notdir'), 'x')
+  const bk2 = backupNow(bkDb, bkDbPath, bkMain, path.join(tmp, 'bk-notdir', 'sub'))
+  ok('第二位置不可写不阻断主备份', fs.existsSync(bk2))
+  saveBackupExtraDir(bkCfg, path.join(tmp, 'bk-notdir', 'sub'))
+  const st2 = backupStatus({ dbPath: bkDbPath, backupDir: bkMain, configPath: bkCfg })
+  ok('第二位置不可写时 extraDirOk=false 且带错误信息', st2.extraDirOk === false && typeof st2.extraError === 'string')
+
+  // 未配置第二位置：extraDir/extraDirOk 为 null
+  saveBackupExtraDir(bkCfg, null)
+  const st3 = backupStatus({ dbPath: bkDbPath, backupDir: bkMain, configPath: bkCfg })
+  ok('未配置第二位置时 extraDir/extraDirOk 为 null', st3.extraDir === null && st3.extraDirOk === null)
+  ok('清除配置后读回为 null', loadBackupConfig(bkCfg).extraDir === null)
+
+  // stale：最新备份距今 > 3 天 → stale:true（用 4 天前 mtime 的假备份模拟）
+  const bkOld = path.join(tmp, 'bk-old')
+  fs.mkdirSync(bkOld, { recursive: true })
+  const oldFile = path.join(bkOld, 'inventory_backup_20200101_030000.db')
+  fs.writeFileSync(oldFile, 'fake')
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3600 * 1000)
+  fs.utimesSync(oldFile, fourDaysAgo, fourDaysAgo)
+  const st4 = backupStatus({ dbPath: bkDbPath, backupDir: bkOld, configPath: bkCfg })
+  ok('超过 3 天没备份 stale 为 true', st4.stale === true && st4.backupCount === 1)
+  const st5 = backupStatus({ dbPath: bkDbPath, backupDir: path.join(tmp, 'bk-none'), configPath: bkCfg })
+  ok('从未备份 stale 为 false 且份数为 0', st5.stale === false && st5.backupCount === 0 && st5.lastBackupAt === null)
+  bkDb.close()
+}
+
+// 27. 过期预警：临期/已过期/库存为 0 不出现/无保质期不出现/YYYY-MM 写法
+{
+  const edb = openDatabase(path.join(tmp, 'exp.db'))
+  // 本地日期串（与 parseExpiryDate 的本地口径对齐，避免 UTC 时差扰动断言）
+  const dayStr = (offset) => {
+    const d = new Date()
+    d.setDate(d.getDate() + offset)
+    const p2 = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+  }
+  const eSoon = cmd.createProduct(edb, { sku_code: '', category: '饵料', brand: '临期牌', model: '十天饵', cost_price: 500, expiry_date: dayStr(10) })
+  cmd.createInbound(edb, { productId: eSoon.id, quantity: 5, costPrice: 500, operator: '测试' })
+  const eOld = cmd.createProduct(edb, { sku_code: '', category: '饵料', brand: '过期牌', model: '陈饵', cost_price: 500, expiry_date: dayStr(-5) })
+  cmd.createInbound(edb, { productId: eOld.id, quantity: 3, costPrice: 500, operator: '测试' })
+  const eNoStock = cmd.createProduct(edb, { sku_code: '', category: '饵料', brand: '零库存牌', cost_price: 500, expiry_date: dayStr(10) })
+  const eNoExp = cmd.createProduct(edb, { sku_code: '', category: '鱼钩', brand: '无保质牌', cost_price: 300 })
+  cmd.createInbound(edb, { productId: eNoExp.id, quantity: 8, costPrice: 300, operator: '测试' })
+  const eFar = cmd.createProduct(edb, { sku_code: '', category: '饵料', brand: '远期牌', cost_price: 500, expiry_date: dayStr(60) })
+  cmd.createInbound(edb, { productId: eFar.id, quantity: 2, costPrice: 500, operator: '测试' })
+  // YYYY-MM 写法：当月 → 按当月最后一天算
+  const nowD = new Date()
+  const ym = `${nowD.getFullYear()}-${String(nowD.getMonth() + 1).padStart(2, '0')}`
+  const eMonth = cmd.createProduct(edb, { sku_code: '', category: '饵料', brand: '当月牌', cost_price: 500, expiry_date: ym })
+  cmd.createInbound(edb, { productId: eMonth.id, quantity: 1, costPrice: 500, operator: '测试' })
+
+  const exp30 = cmd.expiringProducts(edb, { days: 30 })
+  const expIds = exp30.map((x) => x.id)
+  ok('临期商品上榜且带剩余天数', expIds.includes(eSoon.id) && exp30.find((x) => x.id === eSoon.id).daysLeft === 10)
+  const expOld = exp30.find((x) => x.id === eOld.id)
+  ok('已过期商品上榜且标记 expired', expOld !== undefined && expOld.expired === true && expOld.daysLeft === -5)
+  ok('库存为 0 的临期商品不上榜', !expIds.includes(eNoStock.id))
+  ok('无保质期商品不上榜', !expIds.includes(eNoExp.id))
+  ok('超过 N 天的不上榜', !expIds.includes(eFar.id))
+  ok('YYYY-MM 写法按当月最后一天算', expIds.includes(eMonth.id))
+  ok('按过期日升序（已过期最急在前）', exp30[0].id === eOld.id)
+  ok('放大窗口期能捞到远期商品', cmd.expiringProducts(edb, { days: 90 }).some((x) => x.id === eFar.id))
+  ok('过期预警返回名称/SKU/库存量', exp30.every((x) => x.name && x.sku && typeof x.stock === 'number'))
+  edb.close()
+}
+
+// 28. 分级库存预警：min_stock 设/改/清 NULL 回退默认 + 低库存口径 COALESCE(min_stock, 5)
+const mdb = openDatabase(path.join(tmp, 'minstock.db'))
+const mA = cmd.createProduct(mdb, { sku_code: '', category: '渔轮', brand: '预警牌', model: 'A轮', cost_price: 1000, min_stock: 20 })
+ok('新建商品 min_stock 落库', mA.min_stock === 20)
+cmd.createInbound(mdb, { productId: mA.id, quantity: 10, costPrice: 1000, operator: '测试' })
+const mB = cmd.createProduct(mdb, { sku_code: '', category: '鱼钩', brand: '预警牌', model: 'B钩', cost_price: 300 })
+ok('不传 min_stock 默认 NULL', mB.min_stock === null)
+cmd.createInbound(mdb, { productId: mB.id, quantity: 3, costPrice: 300, operator: '测试' })
+let lowList = cmd.lowStockProducts(mdb)
+ok('商品 A 设 20 → 库存 10 报警', lowList.some((r) => r.id === mA.id && r.threshold === 20 && r.stock === 10))
+ok('商品 B 没设 → 库存 3 按默认 5 报警', lowList.some((r) => r.id === mB.id && r.threshold === 5))
+cmd.createInbound(mdb, { productId: mB.id, quantity: 2, costPrice: 300, operator: '测试' })
+lowList = cmd.lowStockProducts(mdb)
+ok('商品 B 补到 5 件不报警（5 不小于 5）', !lowList.some((r) => r.id === mB.id))
+const mA2 = cmd.updateProduct(mdb, mA.id, { min_stock: 5 })
+ok('updateProduct 改 min_stock 生效', mA2.min_stock === 5 && !cmd.lowStockProducts(mdb).some((r) => r.id === mA.id))
+const mA3 = cmd.updateProduct(mdb, mA.id, { min_stock: null })
+ok('min_stock 清 NULL 回退默认阈值（库存 10 不再报警）', mA3.min_stock === null && !cmd.lowStockProducts(mdb).some((r) => r.id === mA.id))
+ok('loadAll 商品行带 min_stock', cmd.loadAll(mdb).products.find((x) => x.id === mA.id).min_stock === null
+  && cmd.loadAll(mdb).products.find((x) => x.id === mB.id).min_stock === null)
+let msErr1 = null
+try { cmd.createProduct(mdb, { sku_code: '', category: '其他', cost_price: 100, min_stock: -1 }) } catch (e) { msErr1 = e }
+ok('负预警线拒绝', msErr1 !== null)
+let msErr2 = null
+try { cmd.updateProduct(mdb, mA.id, { min_stock: 2.5 }) } catch (e) { msErr2 = e }
+ok('小数预警线拒绝', msErr2 !== null)
+// 老库迁移：无 min_stock 列的老 products 表 openDatabase 后补列，老数据为 NULL
+{
+  const msOldPath = path.join(tmp, 'minstock-old.db')
+  const msOldRaw = new DatabaseSync(msOldPath)
+  msOldRaw.exec(`
+    CREATE TABLE products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sku_code TEXT UNIQUE NOT NULL,
+      barcode TEXT,
+      category TEXT NOT NULL,
+      sub_category TEXT,
+      brand TEXT,
+      model TEXT,
+      cost_price INTEGER NOT NULL,
+      location TEXT,
+      status TEXT DEFAULT '待盘点'
+    );
+    INSERT INTO products (sku_code, category, cost_price) VALUES ('OLD-MS-1', '鱼竿', 100);
+  `)
+  msOldRaw.close()
+  const msOldDb = openDatabase(msOldPath)
+  ok('老库迁移补 min_stock 列',
+    msOldDb.prepare('PRAGMA table_info(products)').all().some((c) => c.name === 'min_stock'))
+  ok('老数据 min_stock 为 NULL（用默认阈值）',
+    msOldDb.prepare('SELECT min_stock FROM products WHERE sku_code = ?').get('OLD-MS-1').min_stock === null)
+  ok('老数据按默认阈值参与低库存预警', cmd.lowStockProducts(msOldDb).some((r) => r.sku_code === 'OLD-MS-1' && r.threshold === 5))
+  msOldDb.close()
+}
+
+// 29. 操作日志：各写命令埋点 / 同事务回滚 / 查询筛选
+{
+  const adb = openDatabase(path.join(tmp, 'audit.db'))
+  const auditCount = () => adb.prepare('SELECT COUNT(*) AS n FROM audit_log').get().n
+  const aBefore = auditCount()
+  const aProd = cmd.createProduct(adb, { sku_code: '', category: '鱼竿', brand: '日志牌', model: '测试竿', cost_price: 1000, suggest_price: 2000 })
+  cmd.createInbound(adb, { productId: aProd.id, quantity: 10, costPrice: 1000, operator: '阿杜' })
+  cmd.confirmOutbound(adb, { productId: aProd.id, quantity: 2, sellingPrice: 2000, operator: '阿杜' })
+  cmd.createReturn(adb, { productId: aProd.id, quantity: 1, refundPrice: 2000, operator: '阿杜' })
+  const aProd2 = cmd.createProduct(adb, { sku_code: '', category: '鱼线', brand: '日志牌', model: '换货线', cost_price: 500, suggest_price: 900 })
+  cmd.createInbound(adb, { productId: aProd2.id, quantity: 5, costPrice: 500, operator: '阿杜' })
+  cmd.createExchange(adb, { oldProductId: aProd.id, newProductId: aProd2.id, quantity: 1, sellingPrice: 900, operator: '阿杜' })
+  cmd.setPriceTier(adb, { productId: aProd.id, tier: 'VIP', price: 1800, operator: '阿杜' })
+  cmd.updateProduct(adb, aProd.id, { location: 'A区', operator: '阿杜' })
+  const aCust = cmd.createCustomer(adb, { name: '日志老王' })
+  cmd.recordPayment(adb, { customerId: aCust.id, amount: 1000, method: '现金' })
+  const aTake = cmd.createStockTake(adb, { operator: '阿杜' })
+  const aTakeItems = adb.prepare('SELECT * FROM stock_take_items WHERE stock_take_id = ?').all(aTake.id)
+  cmd.submitStockTake(adb, {
+    takeId: aTake.id,
+    items: aTakeItems.map((it) => ({ itemId: it.id, actualQty: it.system_qty, reason: '' })),
+    operator: '阿杜',
+  })
+  const aSup = cmd.createSupplier(adb, { name: '日志供应商' })
+  const aPo = cmd.createPurchaseOrder(adb, { supplierId: aSup.id, items: [{ productId: aProd.id, quantity: 3, costPrice: 950 }] })
+  const aPoItem = cmd.purchaseOrderDetail(adb, { id: aPo.id }).items[0]
+  cmd.receivePurchaseOrder(adb, { id: aPo.id, items: [{ itemId: aPoItem.id, quantity: 3 }], operator: '阿杜' })
+  const aDel = cmd.createProduct(adb, { sku_code: '', category: '其他', brand: '日志牌', model: '即删', cost_price: 100 })
+  cmd.deleteProduct(adb, aDel.id)
+
+  // 埋点条数：新建商品×3 + 入库×2 + 出库/退货/换货/改价/改商品/新建客户/还账/盘点/采购收货/删商品 各1 = 15
+  ok('各写命令均留下操作日志', auditCount() === aBefore + 15)
+  const logs = cmd.auditLog(adb, {})
+  for (const act of ['新建商品', '入库', '出库', '退货', '换货', '改价', '改商品', '新建客户', '还账', '盘点', '采购收货', '删商品']) {
+    ok(`日志含动作「${act}」`, logs.some((l) => l.action === act))
+  }
+  ok('日志按时间倒序', logs[0].id > logs[logs.length - 1].id)
+  ok('日志带对象描述（如 商品名 x2）', logs.some((l) => l.action === '出库' && l.entity.includes('测试竿') && l.entity.includes('x2')))
+  ok('日志带操作员', logs.some((l) => l.action === '入库' && l.operator === '阿杜'))
+  ok('日志带关键数据 detail', logs.some((l) => l.action === '改价' && l.detail.includes('1800')))
+  const inLogs = cmd.auditLog(adb, { action: '入库' })
+  ok('按 action 筛选日志', inLogs.length === 2 && inLogs.every((l) => l.action === '入库'))
+  ok('limit 限制生效', cmd.auditLog(adb, { limit: 3 }).length === 3)
+
+  // 同事务回滚：收货明细混一条非法明细，整单回滚——第一条已埋的日志也跟着回滚
+  const aPo2 = cmd.createPurchaseOrder(adb, {
+    supplierId: aSup.id,
+    items: [{ productId: aProd.id, quantity: 5, costPrice: 950 }, { productId: aProd2.id, quantity: 3, costPrice: 480 }],
+  })
+  const aPo2Items = cmd.purchaseOrderDetail(adb, { id: aPo2.id }).items
+  const auditBeforeRollback = auditCount()
+  let aAtomicErr = null
+  try {
+    cmd.receivePurchaseOrder(adb, {
+      id: aPo2.id,
+      items: [{ itemId: aPo2Items[0].id, quantity: 2 }, { itemId: 999999, quantity: 1 }],
+      operator: '阿杜',
+    })
+  } catch (e) { aAtomicErr = e }
+  ok('混合非法明细收货报错', aAtomicErr !== null)
+  ok('同事务回滚时日志也回滚', auditCount() === auditBeforeRollback)
+  // 校验失败/业务拒绝同样不留日志
+  const delBlockedA = cmd.deleteProduct(adb, aProd.id)
+  ok('删除被拒绝的商品不留日志', delBlockedA.ok === false && auditCount() === auditBeforeRollback)
+  adb.close()
+}
+
+// 30. 供应商对账：明细（批次/数量/金额/采购单号）+ 汇总（总额/件数/最近进货/待收金额）
+const sdb = openDatabase(path.join(tmp, 'supplier.db'))
+const sSup = cmd.createSupplier(sdb, { name: '对账供应商' })
+const sOther = cmd.createSupplier(sdb, { name: '别家供应商' })
+const sP1 = cmd.createProduct(sdb, { sku_code: '', category: '鱼竿', brand: '对账牌', model: '竿A', cost_price: 1000 })
+const sP2 = cmd.createProduct(sdb, { sku_code: '', category: '鱼线', brand: '对账牌', model: '线B', cost_price: 500 })
+cmd.createInbound(sdb, { productId: sP1.id, quantity: 10, costPrice: 1000, supplierId: sSup.id, operator: '测试' })
+cmd.createInbound(sdb, { productId: sP2.id, quantity: 20, costPrice: 500, supplierId: sSup.id, operator: '测试' })
+cmd.createInbound(sdb, { productId: sP1.id, quantity: 5, costPrice: 900, supplierId: sOther.id, operator: '测试' }) // 别家的不能算进来
+const sPo = cmd.createPurchaseOrder(sdb, { supplierId: sSup.id, items: [{ productId: sP1.id, quantity: 8, costPrice: 1100 }] })
+const sPoItem = cmd.purchaseOrderDetail(sdb, { id: sPo.id }).items[0]
+cmd.receivePurchaseOrder(sdb, { id: sPo.id, items: [{ itemId: sPoItem.id, quantity: 3 }], operator: '测试' })
+const sStmt = cmd.supplierStatement(sdb, { supplierId: sSup.id })
+ok('对账单含 3 条进货明细（别家不算）', sStmt.lines.length === 3)
+ok('对账明细金额=数量×成本价', sStmt.lines.every((l) => l.amount === l.quantity * l.cost_price))
+ok('对账总进货金额正确', sStmt.totalAmount === 10 * 1000 + 20 * 500 + 3 * 1100)
+ok('对账总件数正确', sStmt.totalQty === 10 + 20 + 3)
+ok('采购收货明细带关联采购单号', sStmt.lines.find((l) => l.po_no !== null)?.po_no === sPo.po_no)
+ok('手动进货明细无采购单号', sStmt.lines.filter((l) => l.po_no === null).length === 2)
+ok('对账明细带批次号/日期/商品名', sStmt.lines.every((l) => l.batch_no && l.date && l.product_name))
+ok('待收采购单金额=未收部分（5 件 × 1100）', sStmt.pendingPoAmount === 5 * 1100)
+ok('最近一次进货时间已给出', typeof sStmt.lastInboundAt === 'string')
+let sStmtErr = null
+try { cmd.supplierStatement(sdb, { supplierId: 99999 }) } catch (e) { sStmtErr = e }
+ok('对账供应商不存在报错', sStmtErr !== null && sStmtErr.message.includes('供应商不存在'))
+
+// 31. 手机端新只读端点：/api/audit + /api/supplier-statement + /api/low-stock 分级阈值
+{
+  const sDir = path.join(tmp, 'srv4')
+  const srvS = createInventoryServer({ db: sdb, dataDir: sDir, basePort: 0 })
+  const stS = await srvS.start()
+  const sBase = `http://127.0.0.1:${stS.port}`
+  const sToken = fs.readFileSync(path.join(sDir, 'server-token.txt'), 'utf8').trim()
+  const auditApi = await (await fetch(`${sBase}/api/audit?token=${sToken}`)).json()
+  ok('/api/audit 返回最近 50 条内日志', Array.isArray(auditApi) && auditApi.length > 0 && auditApi.length <= 50)
+  ok('/api/audit 含采购收货动作', auditApi.some((l) => l.action === '采购收货'))
+  ok('/api/audit 无 token 401', (await fetch(`${sBase}/api/audit`)).status === 401)
+  const ssApi = await (await fetch(`${sBase}/api/supplier-statement?token=${sToken}&id=${sSup.id}`)).json()
+  ok('/api/supplier-statement 返回对账单', ssApi.totalAmount === sStmt.totalAmount && ssApi.lines.length === 3)
+  const ssBad = await fetch(`${sBase}/api/supplier-statement?token=${sToken}&id=99999`)
+  ok('/api/supplier-statement 供应商不存在 400', ssBad.status === 400 && (await ssBad.json()).error.includes('供应商不存在'))
+  ok('/api/supplier-statement 无 token 401', (await fetch(`${sBase}/api/supplier-statement?id=${sSup.id}`)).status === 401)
+  await srvS.stop()
+
+  // 分级阈值进手机端低库存：mA 设回 20（库存 10 < 20 → 上榜且带各自阈值）
+  cmd.updateProduct(mdb, mA.id, { min_stock: 20 })
+  const mDir = path.join(tmp, 'srv5')
+  const srvM = createInventoryServer({ db: mdb, dataDir: mDir, basePort: 0 })
+  const stM = await srvM.start()
+  const mBase = `http://127.0.0.1:${stM.port}`
+  const mToken = fs.readFileSync(path.join(mDir, 'server-token.txt'), 'utf8').trim()
+  const lowApi = await (await fetch(`${mBase}/api/low-stock?token=${mToken}`)).json()
+  ok('/api/low-stock 按各自预警线预警', lowApi.some((r) => r.sku === mA.sku_code && r.threshold === 20 && r.stock === 10))
+  const sumApi = await (await fetch(`${mBase}/api/summary?token=${mToken}`)).json()
+  ok('/api/summary 低库存数与命令层口径一致', sumApi.lowStockCount === cmd.lowStockProducts(mdb).length)
+  await srvM.stop()
+}
+mdb.close()
+sdb.close()
+
+// 32. 新通道注册检查（main.js + preload 白名单）
+const newChannels = ['backup:status', 'backup:setExtraDir', 'backup:clearExtraDir', 'product:expiring', 'audit:list', 'supplier:statement']
+ok('main.js 注册新通道', newChannels.every((ch) => mainSrc.includes(`'${ch}'`)))
+ok('preload 白名单含新通道', newChannels.every((ch) => preloadSrc.includes(`'${ch}'`)))
+ok('main.js 第二备份位置用目录选择框', mainSrc.includes('openDirectory'))
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`\n全部 ${passed} 项断言通过`)

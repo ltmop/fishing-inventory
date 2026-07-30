@@ -31,7 +31,7 @@ export function LowStockAlert() {
       products
         .filter((p) => p.status !== '停产')
         .map((p) => ({ p, total: totalStockOf(p.id) }))
-        .filter((x) => x.total < LOW_STOCK_THRESHOLD)
+        .filter((x) => x.total < (x.p.min_stock ?? LOW_STOCK_THRESHOLD))
         .sort((a, b) => a.total - b.total),
     [products, totalStockOf],
   )
@@ -61,7 +61,7 @@ export function LowStockAlert() {
             有 {lowItems.length} 个商品库存偏低
           </DialogTitle>
           <DialogDescription>
-            以下商品不足 {LOW_STOCK_THRESHOLD} 件，建议今天安排补货，别等卖断了才发现
+            以下商品库存低于各自预警线（未单独设置的按 {LOW_STOCK_THRESHOLD} 件算），建议今天安排补货，别等卖断了才发现
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-64 space-y-1 overflow-auto rounded-md border p-2">

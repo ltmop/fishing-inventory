@@ -12,7 +12,7 @@ import * as kws from './kws.js'
 import { MODEL_NAME, ensureModel } from './modelManager.js'
 import { TTS_MODEL_NAME, ensureTtsModel } from './ttsModelManager.js'
 import { KWS_MODEL_NAME, ensureKwsModel } from './kwsModelManager.js'
-import { backupNow, backupNowAsync, scheduleDailyBackup, restoreBackup } from './backup.js'
+import { backupNow, backupNowAsync, scheduleDailyBackup, restoreBackup, backupStatus, loadBackupConfig, saveBackupExtraDir } from './backup.js'
 import * as feedback from './feedback.js'
 import { createInventoryServer } from './server.js'
 
@@ -27,6 +27,9 @@ if (!app.requestSingleInstanceLock()) {
 const dataDir = path.join(app.getPath('appData'), 'fishing-inventory')
 const dbPath = path.join(dataDir, 'data.db')
 const backupDir = path.join(dataDir, 'backup')
+// 第二备份位置配置（U 盘/网盘目录）：{ extraDir }，见 backup.js
+const backupConfigPath = path.join(dataDir, 'backup-config.json')
+const getExtraDir = () => loadBackupConfig(backupConfigPath).extraDir
 ai.initAi(dataDir)
 // 离线语音识别模型目录：首次启动后可经 voice:download 通道下载到本机
 const voiceModelDir = path.join(dataDir, 'models', MODEL_NAME)
@@ -101,7 +104,8 @@ function registerIpc() {
   handle('data:loadAll', (d) => commands.loadAll(d))
   handle('product:create', (d, p) => commands.createProduct(d, p))
   handle('product:update', (d, p) => commands.updateProduct(d, p.id, p))
-  handle('product:delete', (d, p) => commands.deleteProduct(d, p.id))
+  handle('product:delete', (d, p) => commands.deleteProduct(d, p.id, p.operator ?? null))
+  handle('product:expiring', (d, p) => commands.expiringProducts(d, p))
   handle('inbound:create', (d, p) => commands.createInbound(d, p))
   handle('outbound:confirm', (d, p) => commands.confirmOutbound(d, p))
   handle('outbound:return', (d, p) => commands.createReturn(d, p))
@@ -131,7 +135,26 @@ function registerIpc() {
   handle('priceTier:set', (d, p) => commands.setPriceTier(d, p))
   handle('priceTier:delete', (d, p) => commands.deletePriceTier(d, p))
   handle('priceTier:list', (d, p) => commands.getPriceTiers(d, p))
-  handle('backup:now', (d) => backupNowAsync(d, dbPath, backupDir))
+  handle('backup:now', (d) => backupNowAsync(d, dbPath, backupDir, getExtraDir()))
+  // 备份状态：最近备份时间/份数/第二位置可用性/超期提醒（设置页用）
+  handle('backup:status', () => backupStatus({ dbPath, backupDir, configPath: backupConfigPath }))
+  // 选第二备份位置（如 U 盘）：每次备份后同一份再复制过去；选完直接回最新状态
+  ipcMain.handle('backup:setExtraDir', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: '选择第二备份位置（如 U 盘或网盘目录）',
+      properties: ['openDirectory'],
+    })
+    if (canceled || filePaths.length === 0) return { ok: false, cancelled: true }
+    saveBackupExtraDir(backupConfigPath, filePaths[0])
+    return { ok: true, ...backupStatus({ dbPath, backupDir, configPath: backupConfigPath }) }
+  })
+  ipcMain.handle('backup:clearExtraDir', () => {
+    saveBackupExtraDir(backupConfigPath, null)
+    return { ok: true, ...backupStatus({ dbPath, backupDir, configPath: backupConfigPath }) }
+  })
+  // 操作日志查询（可按 action 筛选）；供应商对账单
+  handle('audit:list', (d, p) => commands.auditLog(d, p))
+  handle('supplier:statement', (d, p) => commands.supplierStatement(d, p))
   // 从备份恢复：选文件 → 二次确认 → 覆盖 data.db → 重启应用让新库生效
   ipcMain.handle('backup:restore', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -317,7 +340,7 @@ app.whenReady().then(() => {
   inventoryServer.start().catch((e) => console.error('[server] 启动失败:', e))
   const stopScheduler = scheduleDailyBackup(db, dbPath, backupDir, (e) =>
     reportBackupError('自动备份失败', e),
-  )
+  getExtraDir)
   createWindow()
   // 模型已就绪则在启动时预加载识别器（约 1s），首次按住说话零等待；模型缺失静默跳过
   voice.preloadRecognizer()
@@ -335,7 +358,7 @@ app.whenReady().then(() => {
     if (restoring) return
     // 退出收尾：备份一次 + checkpoint 截断 WAL
     try {
-      backupNow(db, dbPath, backupDir)
+      backupNow(db, dbPath, backupDir, getExtraDir())
     } catch (e) {
       // 退出阶段用户看不到任何界面，只写日志文件留痕，不弹框
       reportBackupError('退出备份失败', e)

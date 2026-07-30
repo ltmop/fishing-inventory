@@ -9,7 +9,8 @@ import { readWakeEnabled, writeWakeEnabled, startWakeListener, stopWakeListener 
 import { useVoiceModel, useTtsModel, useKwsModel } from '@/lib/useModelDownload'
 import { useOnline } from '@/lib/useOnline'
 import { useAppStore } from '@/store/appStore'
-import { formatDateTime } from '@/lib/formatters'
+import { formatRelativeTime } from '@/lib/formatters'
+import type { BackupStatus } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -38,6 +39,9 @@ export function SettingsPage() {
   const [restoring, setRestoring] = useState(false)
   const [backupResult, setBackupResult] = useState('')
   const [error, setError] = useState('')
+  // 备份状态（backup:status）：上次时间/份数/第二位置可用性/超期提醒
+  const [bStatus, setBStatus] = useState<BackupStatus | null>(null)
+  const [extraBusy, setExtraBusy] = useState(false)
 
   // 使用偏好（本机保存，刷新/重启后仍生效）
   const soundEnabled = useAppStore((s) => s.soundEnabled)
@@ -158,6 +162,7 @@ export function SettingsPage() {
   useEffect(() => {
     if (backend) {
       backend.invoke('app:info').then(setInfo).catch(() => {})
+      backend.invoke('backup:status').then(setBStatus).catch(() => {})
       backend
         .invoke('ai:status')
         .then((s) => setAiConfigured(!!s?.configured))
@@ -206,8 +211,9 @@ export function SettingsPage() {
     try {
       const dest = await backend.invoke('backup:now')
       setBackupResult(dest)
-      // 刷新"最近备份时间"显示
+      // 刷新"最近备份时间"显示与备份状态卡片
       backend.invoke('app:info').then(setInfo).catch(() => {})
+      backend.invoke('backup:status').then(setBStatus).catch(() => {})
     } catch (e) {
       setError(e instanceof Error ? e.message : '备份失败')
     } finally {
@@ -231,6 +237,48 @@ export function SettingsPage() {
       setRestoring(false)
     }
   }
+
+  // 选第二备份位置（U 盘/网盘文件夹）：主进程弹系统目录选择，选完直接回最新状态
+  const handleSetExtraDir = async () => {
+    if (!backend) return
+    setExtraBusy(true)
+    setError('')
+    try {
+      const r = await backend.invoke('backup:setExtraDir')
+      if (r?.cancelled) return // 用户取消选择：静默
+      if (r?.ok) {
+        const { ok: _ok, ...status } = r
+        setBStatus(status as BackupStatus)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '设置第二备份位置失败')
+    } finally {
+      setExtraBusy(false)
+    }
+  }
+
+  // 取消第二备份位置（已复制过去的备份文件不动，只是以后不再复制）
+  const handleClearExtraDir = async () => {
+    if (!backend) return
+    setExtraBusy(true)
+    setError('')
+    try {
+      const r = await backend.invoke('backup:clearExtraDir')
+      if (r?.ok) {
+        const { ok: _ok, ...status } = r
+        setBStatus(status as BackupStatus)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '取消第二备份位置失败')
+    } finally {
+      setExtraBusy(false)
+    }
+  }
+
+  // 超期未备份天数（stale=true 时顶端红条用）
+  const staleDays = bStatus?.lastBackupAt
+    ? Math.floor((Date.now() - new Date(bStatus.lastBackupAt).getTime()) / 86400000)
+    : 0
 
   return (
     <div className="space-y-6">
@@ -282,6 +330,35 @@ export function SettingsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* 超过 3 天没备份：卡片顶部红条提醒 */}
+          {bStatus?.stale && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+              已经 {staleDays} 天没备份了，点下面「立即备份」备份一次——数据丢了可找不回来
+            </div>
+          )}
+
+          {/* 备份状态总览：上次时间 / 共几份 / 备份位置 */}
+          {backend && bStatus && (
+            <div className="grid grid-cols-3 gap-3 text-sm">
+              <div className="rounded-lg bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">上次备份</div>
+                <div className={`mt-0.5 font-medium ${bStatus.lastBackupAt ? 'text-slate-800' : 'text-amber-600'}`}>
+                  {bStatus.lastBackupAt ? formatRelativeTime(bStatus.lastBackupAt) : '还没有备份过'}
+                </div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">备份份数</div>
+                <div className="mt-0.5 font-medium text-slate-800">共 {bStatus.backupCount} 份</div>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-4 py-3">
+                <div className="text-xs text-slate-500">备份位置</div>
+                <div className="mt-0.5 font-mono text-xs break-all text-slate-800">
+                  {info?.backupDir ?? '读取中…'}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center gap-4">
             <Button
               onClick={handleBackup}
@@ -298,14 +375,53 @@ export function SettingsPage() {
             >
               {restoring ? '恢复中...' : '从备份恢复'}
             </Button>
-            <span className="text-sm text-muted-foreground">
-              {!backend
-                ? '浏览器开发模式使用 mock 数据，备份功能请在 Electron 应用中使用'
-                : info?.lastBackupAt
-                  ? `最近备份：${formatDateTime(new Date(info.lastBackupAt).toISOString())}`
-                  : '还没有备份过，建议现在备份一次'}
-            </span>
+            {!backend && (
+              <span className="text-sm text-muted-foreground">
+                浏览器开发模式使用 mock 数据，备份功能请在 Electron 应用中使用
+              </span>
+            )}
           </div>
+
+          {/* 第二备份位置：硬盘坏了本机备份也会丢，强烈建议设一个 U 盘/网盘文件夹 */}
+          {backend && bStatus && (
+            bStatus.extraDir ? (
+              <div className="space-y-2 rounded-lg border border-slate-200 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <span
+                    className={`inline-block size-2.5 shrink-0 rounded-full ${
+                      bStatus.extraDirOk ? 'bg-green-500' : 'bg-red-500'
+                    }`}
+                  />
+                  <span className="font-medium text-slate-800">第二备份位置</span>
+                  <span className="font-mono text-xs break-all text-slate-600">{bStatus.extraDir}</span>
+                </div>
+                <div className={`text-xs ${bStatus.extraDirOk ? 'text-green-700' : 'text-red-600'}`}>
+                  {bStatus.extraDirOk
+                    ? '状态正常：每次备份后会自动再复制一份过去'
+                    : `最近复制失败：${bStatus.extraError ?? '文件夹写不进去，U 盘是不是拔了？插上后会自动恢复'}`}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={handleSetExtraDir} disabled={extraBusy}>
+                    换个位置
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={handleClearExtraDir} disabled={extraBusy}>
+                    取消第二位置
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+                <span className="flex-1 text-sm text-amber-700">
+                  第二备份位置未设置——硬盘坏了备份也会一起丢，建议选个 U 盘或网盘文件夹
+                </span>
+                <Button variant="outline" size="sm" onClick={handleSetExtraDir} disabled={extraBusy}>
+                  <FolderOpen className="size-4" />
+                  {extraBusy ? '选择中...' : '选择 U 盘/网盘文件夹'}
+                </Button>
+              </div>
+            )
+          )}
+
           {backupResult && (
             <div className="flex items-start gap-2 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
               <CheckCircle2 className="mt-0.5 size-4 shrink-0" />

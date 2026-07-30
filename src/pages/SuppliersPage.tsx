@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, ReceiptText, Search, Trash2 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
-import { formatPrice, productName } from '@/lib/formatters'
-import type { Supplier } from '@/types'
+import { formatDate, formatPrice, productName } from '@/lib/formatters'
+import type { Supplier, SupplierStatement } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -35,6 +35,25 @@ export function SuppliersPage() {
   const addSupplier = useAppStore((s) => s.addSupplier)
   const updateSupplier = useAppStore((s) => s.updateSupplier)
   const deleteSupplier = useAppStore((s) => s.deleteSupplier)
+  const supplierStatement = useAppStore((s) => s.supplierStatement)
+
+  // 供应商对账单弹窗
+  const [stmtFor, setStmtFor] = useState<Supplier | null>(null)
+  const [stmt, setStmt] = useState<SupplierStatement | null>(null)
+  const [stmtLoading, setStmtLoading] = useState(false)
+
+  const openStatement = (s: Supplier) => {
+    setStmtFor(s)
+    setStmt(null)
+    setStmtLoading(true)
+    supplierStatement(s.id)
+      .then(setStmt)
+      .catch((e) => {
+        setStmtFor(null)
+        setPageError(`对账单加载失败：${e instanceof Error ? e.message : String(e)}`)
+      })
+      .finally(() => setStmtLoading(false))
+  }
 
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [formOpen, setFormOpen] = useState(false)
@@ -223,6 +242,10 @@ export function SuppliersPage() {
                         <TableCell className="text-right">{productIds.length}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" onClick={() => openStatement(s)}>
+                              <ReceiptText className="size-3" />
+                              对账
+                            </Button>
                             <Button variant="outline" size="sm" onClick={() => openEdit(s)}>
                               <Pencil className="size-3" />
                               编辑
@@ -375,6 +398,111 @@ export function SuppliersPage() {
               {deleteBusy ? '删除中...' : '确认删除'}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 供应商对账单 Dialog：汇总头 + 进货明细（样式参照客户对账单） */}
+      <Dialog open={stmtFor !== null} onOpenChange={(open) => !open && setStmtFor(null)}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-3">
+              {stmtFor?.name}
+              {stmtFor?.phone && (
+                <span className="text-sm font-normal text-muted-foreground">{stmtFor.phone}</span>
+              )}
+            </DialogTitle>
+            <DialogDescription>从他家进的每一批货都在这儿</DialogDescription>
+          </DialogHeader>
+
+          {stmtLoading && (
+            <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              正在翻进货账...
+            </div>
+          )}
+
+          {!stmtLoading && stmt && (
+            <>
+              {/* 汇总头：累计进货 / 件数 / 最近进货 / 待收货 */}
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <div className="rounded-xl bg-slate-50 px-4 py-3">
+                  <div className="text-xs text-slate-500">累计进货</div>
+                  <div className="text-xl font-bold tabular-nums text-slate-800">
+                    {formatPrice(stmt.totalAmount)}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-slate-50 px-4 py-3">
+                  <div className="text-xs text-slate-500">进货件数</div>
+                  <div className="text-xl font-bold tabular-nums text-slate-800">
+                    共 {stmt.totalQty} 件
+                  </div>
+                </div>
+                <div className="rounded-xl bg-slate-50 px-4 py-3">
+                  <div className="text-xs text-slate-500">最近进货</div>
+                  <div className="text-xl font-bold text-slate-800">
+                    {stmt.lastInboundAt ? formatDate(stmt.lastInboundAt) : '没有进过货'}
+                  </div>
+                </div>
+                <div className={`rounded-xl px-4 py-3 ${stmt.pendingPoAmount > 0 ? 'bg-amber-50' : 'bg-slate-50'}`}>
+                  <div className={`text-xs ${stmt.pendingPoAmount > 0 ? 'text-amber-600' : 'text-slate-500'}`}>
+                    待收货
+                  </div>
+                  <div
+                    className={`text-xl font-bold tabular-nums ${
+                      stmt.pendingPoAmount > 0 ? 'text-amber-700' : 'text-slate-400'
+                    }`}
+                  >
+                    {stmt.pendingPoAmount > 0 ? formatPrice(stmt.pendingPoAmount) : '没有待收'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="max-h-[46vh] overflow-y-auto pr-1">
+                <div className="mb-2 text-sm font-medium text-slate-700">
+                  进货明细（共 {stmt.lines.length} 批）
+                </div>
+                {stmt.lines.length === 0 ? (
+                  <div className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+                    还没有从他家进过货
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>时间</TableHead>
+                        <TableHead>商品</TableHead>
+                        <TableHead className="text-right">数量</TableHead>
+                        <TableHead className="text-right">单价</TableHead>
+                        <TableHead className="text-right">金额</TableHead>
+                        <TableHead>单号</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {stmt.lines.map((l) => (
+                        <TableRow key={l.batch_id}>
+                          <TableCell className="whitespace-nowrap">{formatDate(l.date)}</TableCell>
+                          <TableCell>
+                            <span className="mr-2">{l.product_name}</span>
+                            <span className="font-mono text-xs text-muted-foreground">{l.sku}</span>
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{l.quantity}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {formatPrice(l.cost_price)}
+                          </TableCell>
+                          <TableCell className="text-right font-medium tabular-nums">
+                            {formatPrice(l.amount)}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {l.po_no ?? l.batch_no}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

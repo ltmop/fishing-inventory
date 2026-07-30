@@ -9,12 +9,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import { confirmOutbound, listCustomers } from './commands.js'
+import { confirmOutbound, listCustomers, lowStockProducts, auditLog, supplierStatement } from './commands.js'
 
 const DEFAULT_PORT = 17532
 const MAX_PORT_RETRY = 10
-// 与 DashboardPage 的 LOW_STOCK_THRESHOLD 保持一致
-const LOW_STOCK_THRESHOLD = 5
 const RATE_LIMIT_PER_MIN = 120
 // 写接口独立限流（更严）与请求体上限
 const WRITE_RATE_LIMIT_PER_MIN = 30
@@ -65,14 +63,8 @@ function querySummary(db) {
   const stock = db
     .prepare('SELECT COALESCE(SUM(quantity),0) AS q, COALESCE(SUM(quantity * cost_price),0) AS v FROM inventory_batches')
     .get()
-  const lowStockCount = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM products p
-       LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
-         ON s.product_id = p.id
-       WHERE COALESCE(s.q, 0) < ?`,
-    )
-    .get(LOW_STOCK_THRESHOLD).n
+  // 低库存口径与桌面端统一：COALESCE(min_stock, 默认阈值)，见 commands.lowStockProducts
+  const lowStockCount = lowStockProducts(db).length
   return {
     todayRevenue,
     todayProfit,
@@ -85,24 +77,15 @@ function querySummary(db) {
   }
 }
 
-/** 低库存商品列表（总库存 < 5，升序，最缺的在前） */
+/** 低库存商品列表（总库存 < 各自预警线 min_stock ?? 默认，升序，最缺的在前） */
 function queryLowStock(db) {
-  return db
-    .prepare(
-      `SELECT p.brand, p.model, p.sku_code, p.location, COALESCE(s.q, 0) AS stock
-       FROM products p
-       LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
-         ON s.product_id = p.id
-       WHERE COALESCE(s.q, 0) < ?
-       ORDER BY stock ASC, p.id ASC`,
-    )
-    .all(LOW_STOCK_THRESHOLD)
-    .map((r) => ({
-      name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
-      sku: r.sku_code,
-      stock: r.stock,
-      location: r.location,
-    }))
+  return lowStockProducts(db).map((r) => ({
+    name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
+    sku: r.sku_code,
+    stock: r.stock,
+    threshold: r.threshold,
+    location: r.location,
+  }))
 }
 
 /** 库存搜索：关键词匹配品牌/型号/SKU/条码（LIKE 通配符转义），老板在仓库找货/手机开单用 */
@@ -858,6 +841,9 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       '/api/inventory': () => queryInventory(db, url.searchParams.get('q')),
       '/api/today': () => queryToday(db),
       '/api/customers': () => queryCustomers(db),
+      '/api/audit': () => auditLog(db, { limit: 50 }),
+      '/api/supplier-statement': () =>
+        supplierStatement(db, { supplierId: Number(url.searchParams.get('id')) }),
     }
     const route = ROUTES[url.pathname]
     if (!route) {
@@ -869,7 +855,12 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       sendJson(res, 401, { error: 'unauthorized' })
       return
     }
-    sendJson(res, 200, route())
+    try {
+      sendJson(res, 200, route())
+    } catch (e) {
+      // 参数/业务校验错误（如供应商不存在）原样返回中文提示
+      sendJson(res, 400, { error: e.message })
+    }
   }
 
   /** 端口被占用时 +1 重试，最多 10 次；basePort=0 由系统分配（测试用） */

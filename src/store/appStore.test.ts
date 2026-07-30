@@ -25,6 +25,7 @@ const baseProduct: Product = {
   rod_action: null,
   power_rating: null,
   expiry_date: null,
+  min_stock: null,
   status: '已盘点',
   created_at: '2026-07-01T00:00:00.000Z',
   updated_at: '2026-07-01T00:00:00.000Z',

@@ -10,6 +10,7 @@ import {
   PackageMinus,
   BarChart3,
   Fish,
+  ScrollText,
   Settings,
   PanelLeftClose,
   PanelLeftOpen,
@@ -31,6 +32,7 @@ const ADMIN_ITEMS = [
   { to: '/stock-take', label: '盘点管理', icon: ClipboardCheck },
   { to: '/customers', label: '客户', icon: Users },
   { to: '/suppliers', label: '供应商', icon: Factory },
+  { to: '/audit', label: '操作日志', icon: ScrollText },
   { to: '/settings', label: '设置', icon: Settings },
 ]
 

@@ -5,8 +5,62 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const KEEP = 7
+// 距上次备份超过 3 天视为"太久没备份"，状态里带 stale 让前端提醒
+const STALE_MS = 3 * 24 * 3600 * 1000
 
-export function backupNow(db, dbPath, backupDir) {
+// ---------- 第二备份位置（U 盘/网盘目录等） ----------
+// 配置存在数据目录的 backup-config.json：{ extraDir: string|null }
+// 最近一次向第二位置复制的失败信息（仅内存留痕，状态接口透出；成功则清空）
+let lastExtraError = null
+
+export function loadBackupConfig(configPath) {
+  try {
+    const c = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    return { extraDir: typeof c.extraDir === 'string' && c.extraDir !== '' ? c.extraDir : null }
+  } catch {
+    return { extraDir: null } // 没配过/文件坏了都按未配置处理
+  }
+}
+
+export function saveBackupExtraDir(configPath, extraDir) {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true })
+  fs.writeFileSync(configPath, JSON.stringify({ extraDir: extraDir ?? null }), 'utf8')
+  return { extraDir: extraDir ?? null }
+}
+
+// 向第二位置复制同一份备份：失败只记状态不阻断主备份（U 盘没插等情况不能弄坏本地备份）
+// 轮转对两个目录独立生效（各留各的最近 7 份）
+function copyToExtraDir(dest, extraDir) {
+  if (!extraDir) return
+  try {
+    fs.mkdirSync(extraDir, { recursive: true })
+    const extraDest = path.join(extraDir, path.basename(dest))
+    fs.copyFileSync(dest, extraDest)
+    verifyBackup(dest, extraDest)
+    rotateBackups(extraDir)
+    lastExtraError = null
+  } catch (e) {
+    lastExtraError = e.message
+    console.error('[backup] 第二备份位置复制失败（主备份不受影响）:', e)
+  }
+}
+
+async function copyToExtraDirAsync(dest, extraDir) {
+  if (!extraDir) return
+  try {
+    await fs.promises.mkdir(extraDir, { recursive: true })
+    const extraDest = path.join(extraDir, path.basename(dest))
+    await fs.promises.copyFile(dest, extraDest)
+    verifyBackup(dest, extraDest)
+    rotateBackups(extraDir)
+    lastExtraError = null
+  } catch (e) {
+    lastExtraError = e.message
+    console.error('[backup] 第二备份位置复制失败（主备份不受影响）:', e)
+  }
+}
+
+export function backupNow(db, dbPath, backupDir, extraDir = null) {
   fs.mkdirSync(backupDir, { recursive: true })
   db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
   const dest = path.join(backupDir, backupName())
@@ -14,12 +68,13 @@ export function backupNow(db, dbPath, backupDir) {
   // 校验备份完整性：坏备份（空文件/大小不符）直接删掉并抛错，不留假备份
   verifyBackup(dbPath, dest)
   rotateBackups(backupDir)
+  copyToExtraDir(dest, extraDir)
   return dest
 }
 
 // 设置页手动备份走异步拷贝，避免大库 copyFileSync 卡住主进程 UI；
 // 定时/退出备份必须保持同步：退出阶段事件循环即将结束，异步拷贝可能来不及写完
-export async function backupNowAsync(db, dbPath, backupDir) {
+export async function backupNowAsync(db, dbPath, backupDir, extraDir = null) {
   await fs.promises.mkdir(backupDir, { recursive: true })
   db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
   const dest = path.join(backupDir, backupName())
@@ -27,7 +82,52 @@ export async function backupNowAsync(db, dbPath, backupDir) {
   // 校验不过时 verifyBackup 会删坏备份并抛错，错误经 IPC 抛回设置页展示
   verifyBackup(dbPath, dest)
   rotateBackups(backupDir)
+  await copyToExtraDirAsync(dest, extraDir)
   return dest
+}
+
+/**
+ * 备份状态（设置页展示 + 超期提醒）：
+ * { lastBackupAt, backupCount, extraDir, extraDirOk, extraError, dbPath, stale }
+ * lastBackupAt/backupCount 直接读备份目录文件列表（文件 mtime 最大值）；
+ * extraDirOk = 配了第二位置且目录可写（未配置时为 null）；stale = 距今超过 3 天没备份。
+ */
+export function backupStatus({ dbPath, backupDir, configPath }) {
+  let lastBackupAt = null
+  let backupCount = 0
+  try {
+    const files = fs
+      .readdirSync(backupDir)
+      .filter((f) => f.startsWith('inventory_backup_') && f.endsWith('.db'))
+    backupCount = files.length
+    if (files.length > 0) {
+      const maxMtime = files
+        .map((f) => fs.statSync(path.join(backupDir, f)).mtimeMs)
+        .reduce((a, b) => Math.max(a, b), 0)
+      lastBackupAt = new Date(maxMtime).toISOString()
+    }
+  } catch {
+    // 备份目录还没建（首次启动）就当没有备份
+  }
+  const { extraDir } = loadBackupConfig(configPath)
+  let extraDirOk = null
+  if (extraDir) {
+    try {
+      fs.accessSync(extraDir, fs.constants.W_OK)
+      extraDirOk = true
+    } catch {
+      extraDirOk = false
+    }
+  }
+  return {
+    lastBackupAt,
+    backupCount,
+    extraDir,
+    extraDirOk,
+    extraError: lastExtraError,
+    dbPath,
+    stale: lastBackupAt !== null && Date.now() - new Date(lastBackupAt).getTime() > STALE_MS,
+  }
 }
 
 function backupName() {
@@ -59,8 +159,9 @@ function rotateBackups(backupDir) {
 
 /** 调度每天凌晨 3:00 自动备份，返回停止函数。
  * onError：备份失败时回调（由 main.js 负责弹错误框 + 写 backup-error.log），
- * 不传则只打 console（保持原行为，便于无 Electron 环境测试） */
-export function scheduleDailyBackup(db, dbPath, backupDir, onError = null) {
+ * 不传则只打 console（保持原行为，便于无 Electron 环境测试）；
+ * getExtraDir：每次备份前取第二备份位置（配了才复制，可为 null 或返回 null 的函数） */
+export function scheduleDailyBackup(db, dbPath, backupDir, onError = null, getExtraDir = null) {
   let timer = null
   const arm = () => {
     const next = new Date()
@@ -68,7 +169,7 @@ export function scheduleDailyBackup(db, dbPath, backupDir, onError = null) {
     if (next <= new Date()) next.setDate(next.getDate() + 1)
     timer = setTimeout(() => {
       try {
-        backupNow(db, dbPath, backupDir)
+        backupNow(db, dbPath, backupDir, getExtraDir?.() ?? null)
       } catch (e) {
         console.error('[backup] 自动备份失败:', e)
         try {

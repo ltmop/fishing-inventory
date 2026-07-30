@@ -20,6 +20,51 @@ export function assertFen(v, name) {
   }
 }
 
+/** 最低库存预警线归一：留空/null → NULL（用默认阈值 5），否则必须是非负整数 */
+function minStockOrNull(v) {
+  if (v == null || v === '') return null
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`最低库存预警线必须是非负整数或留空，收到：${v}`)
+  }
+  return n
+}
+
+// ---------- 操作日志（audit_log） ----------
+// 埋点规则：日志 INSERT 与业务写入在同一事务里，一起提交/一起回滚；
+// 校验失败/提前 return（库存不足等）时零写入，自然也不留日志。
+
+/** 写一条操作日志（仅供各写命令在事务内调用） */
+function logAudit(db, action, entity, detail, operator) {
+  db.prepare(
+    'INSERT INTO audit_log (action, entity, detail, operator, created_at) VALUES (?, ?, ?, ?, ?)',
+  ).run(
+    action,
+    entity ?? null,
+    detail == null ? null : typeof detail === 'string' ? detail : JSON.stringify(detail),
+    operator ?? null,
+    now(),
+  )
+}
+
+/** 操作日志查询：按时间倒序，可按 action 筛选（如 '入库'/'改价'） */
+export function auditLog(db, { limit = 200, action } = {}) {
+  const n = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000)
+  if (action != null && action !== '') {
+    return db
+      .prepare('SELECT * FROM audit_log WHERE action = ? ORDER BY created_at DESC, id DESC LIMIT ?')
+      .all(String(action), n)
+  }
+  return db
+    .prepare('SELECT * FROM audit_log ORDER BY created_at DESC, id DESC LIMIT ?')
+    .all(n)
+}
+
+/** 商品显示名：品牌+型号，都没有回退 SKU（与 customerStatement / server.js 同口径） */
+function productLabel(p) {
+  return [p.brand, p.model].filter(Boolean).join(' ') || p.sku_code
+}
+
 function pad(n, w = 3) {
   return String(n).padStart(w, '0')
 }
@@ -114,6 +159,7 @@ function specOrNull(v) {
 
 export function createProduct(db, input) {
   const ts = now()
+  const minStock = minStockOrNull(input.min_stock)
   // SKU 规则（简化版）：显式传入的原样用（如 CSV 导入、老五段式）；
   // 留空时有条码直接用条码（扫码枪扫出来就是它），无条码用纯数字编号（1001 起递增）
   let skuCode = input.sku_code?.trim()
@@ -124,27 +170,32 @@ export function createProduct(db, input) {
     }
   }
   if (!skuCode) skuCode = nextNumericSku(db)
-  const info = db
-    .prepare(
-      `INSERT INTO products (sku_code, barcode, category, sub_category, brand, model, cost_price, suggest_price, location, status, rod_length, rod_action, power_rating, line_number, hook_size, color, material, expiry_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      skuCode,
-      input.barcode ?? null,
-      input.category,
-      input.sub_category ?? null,
-      input.brand ?? null,
-      input.model ?? null,
-      input.cost_price,
-      input.suggest_price ?? null,
-      input.location ?? null,
-      input.status ?? '待盘点',
-      ...SPEC_FIELDS.map((f) => specOrNull(input[f])),
-      ts,
-      ts,
-    )
-  return db.prepare('SELECT * FROM products WHERE id = ?').get(info.lastInsertRowid)
+  return inTransaction(db, () => {
+    const info = db
+      .prepare(
+        `INSERT INTO products (sku_code, barcode, category, sub_category, brand, model, cost_price, suggest_price, location, status, rod_length, rod_action, power_rating, line_number, hook_size, color, material, expiry_date, min_stock, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        skuCode,
+        input.barcode ?? null,
+        input.category,
+        input.sub_category ?? null,
+        input.brand ?? null,
+        input.model ?? null,
+        input.cost_price,
+        input.suggest_price ?? null,
+        input.location ?? null,
+        input.status ?? '待盘点',
+        ...SPEC_FIELDS.map((f) => specOrNull(input[f])),
+        minStock,
+        ts,
+        ts,
+      )
+    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(info.lastInsertRowid)
+    logAudit(db, '新建商品', productLabel(row), { sku: row.sku_code, cost_price: row.cost_price, min_stock: minStock }, input.operator)
+    return row
+  })
 }
 
 /** 修改商品基本信息；SKU 一经创建不可修改（避免历史流水对不上） */
@@ -153,34 +204,44 @@ export function updateProduct(db, id, input) {
   if (!cur) throw new Error('商品不存在')
   // 与现有行合并，允许前端只传要改的字段；SKU 创建后不可改
   const v = { ...cur, ...input, id: cur.id, sku_code: cur.sku_code }
-  db.prepare(
-    `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, updated_at = ?
-     WHERE id = ?`,
-  ).run(
-    v.category,
-    v.sub_category ?? null,
-    v.brand ?? null,
-    v.model ?? null,
-    v.cost_price,
-    v.suggest_price ?? null,
-    v.location ?? null,
-    v.status ?? '待盘点',
-    ...SPEC_FIELDS.map((f) => specOrNull(v[f])),
-    now(),
-    id,
-  )
-  return db.prepare('SELECT * FROM products WHERE id = ?').get(id)
+  const minStock = minStockOrNull(v.min_stock)
+  return inTransaction(db, () => {
+    db.prepare(
+      `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, min_stock = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(
+      v.category,
+      v.sub_category ?? null,
+      v.brand ?? null,
+      v.model ?? null,
+      v.cost_price,
+      v.suggest_price ?? null,
+      v.location ?? null,
+      v.status ?? '待盘点',
+      ...SPEC_FIELDS.map((f) => specOrNull(v[f])),
+      minStock,
+      now(),
+      id,
+    )
+    const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id)
+    logAudit(db, '改商品', productLabel(row), { sku: row.sku_code, cost_price: row.cost_price, min_stock: minStock }, input.operator)
+    return row
+  })
 }
 
 /** 仅允许删除没有任何批次和流水的商品，防止库存历史断链 */
-export function deleteProduct(db, id) {
+export function deleteProduct(db, id, operator = null) {
   const batchCount = db.prepare('SELECT COUNT(*) AS n FROM inventory_batches WHERE product_id = ?').get(id).n
   const txCount = db.prepare('SELECT COUNT(*) AS n FROM transactions WHERE product_id = ?').get(id).n
   if (batchCount > 0 || txCount > 0) {
     return { ok: false, reason: `该商品存在 ${batchCount} 个批次、${txCount} 条流水，不能删除；可改为"停产"状态` }
   }
-  db.prepare('DELETE FROM products WHERE id = ?').run(id)
-  return { ok: true }
+  return inTransaction(db, () => {
+    const cur = db.prepare('SELECT * FROM products WHERE id = ?').get(id)
+    db.prepare('DELETE FROM products WHERE id = ?').run(id)
+    if (cur) logAudit(db, '删商品', productLabel(cur), { sku: cur.sku_code }, operator)
+    return { ok: true }
+  })
 }
 
 // ---------- 入库 ----------
@@ -210,6 +271,9 @@ export function createInbound(db, { productId, quantity, costPrice, location, su
       ts,
       productId,
     )
+    const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(productId)
+    logAudit(db, '入库', `${prod ? productLabel(prod) : `#${productId}`} x${quantity}`,
+      { batchNo, quantity, costPrice, supplierId: supplierId ?? null }, operator)
     return { batchId, batchNo }
   })
 }
@@ -302,6 +366,9 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
       })
       remaining -= deduct
     }
+    const outProd = db.prepare('SELECT * FROM products WHERE id = ?').get(productId)
+    logAudit(db, '出库', `${outProd ? productLabel(outProd) : `#${productId}`} x${quantity}`,
+      { quantity, sellingPrice: sellingPrice ?? null, totalDue, paidAmount: isCredit ? paidAmount : null, creditAmount: isCredit ? totalDue - paidAmount : 0, customerId: customerId ?? null }, operator)
     return {
       ok: true,
       allocations,
@@ -368,6 +435,9 @@ export function createReturn(db, { productId, quantity, refundPrice, operator, c
       `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount)
        VALUES (?, ?, 'return', ?, ?, ?, ?, ?, '退货回补', ?, NULL)`,
     ).run(productId, batchId, quantity, unitCost, refundPrice ?? null, ts, operator ?? null, customerId ?? null)
+    const retProd = db.prepare('SELECT * FROM products WHERE id = ?').get(productId)
+    logAudit(db, '退货', `${retProd ? productLabel(retProd) : `#${productId}`} x${quantity}`,
+      { quantity, refundPrice: refundPrice ?? null, customerId: customerId ?? null }, operator)
     return { ok: true, batchId }
   })
 }
@@ -512,6 +582,11 @@ export function createExchange(db, { oldProductId, newProductId, quantity, selli
       result.refundHandling = offset ? 'credit_offset' : 'cash'
       if (offset) result.refundCustomerId = oldTx.customer_id
     }
+    const oldProd = db.prepare('SELECT * FROM products WHERE id = ?').get(oldProductId)
+    const newProd = db.prepare('SELECT * FROM products WHERE id = ?').get(newProductId)
+    logAudit(db, '换货',
+      `${oldProd ? productLabel(oldProd) : `#${oldProductId}`} → ${newProd ? productLabel(newProd) : `#${newProductId}`} x${quantity}`,
+      { quantity, diff, diffCredit, customerId: customerId ?? null }, operator)
     return result
   })
 }
@@ -591,7 +666,9 @@ export function createCustomer(db, { name, phone, notes, price_level }) {
     const info = db
       .prepare('INSERT INTO customers (name, phone, notes, price_level, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(n, phone?.trim() || null, notes?.trim() || null, price_level ?? null, now())
-    return db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid)
+    const row = db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid)
+    logAudit(db, '新建客户', n, { phone: row.phone, price_level: row.price_level }, null)
+    return row
   })
 }
 
@@ -700,6 +777,9 @@ export function recordPayment(db, { customerId, amount, method, notes }) {
       .run(customerId, amount, m, notes?.trim() || null, now())
     const payment = db.prepare('SELECT * FROM payments WHERE id = ?').get(info.lastInsertRowid)
     const outstanding = before - amount
+    const custName = db.prepare('SELECT name FROM customers WHERE id = ?').get(customerId).name
+    logAudit(db, '还账', `${custName} 还 ${(amount / 100).toFixed(2)} 元`,
+      { amount, method: m, before, outstanding }, null)
     return {
       ok: true,
       payment,
@@ -841,7 +921,7 @@ export function completeStockTake(db, takeId) {
  * 那种流程中途崩溃会留下改了明细没落实库存的半成品状态。
  * @param {{ takeId: number, items: Array<{ itemId: number, actualQty: number, reason: string }> }} payload
  */
-export function submitStockTake(db, { takeId, items }) {
+export function submitStockTake(db, { takeId, items, operator }) {
   return inTransaction(db, () => {
     const updItem = db.prepare(
       'UPDATE stock_take_items SET actual_qty = ?, reason = ? WHERE id = ? AND stock_take_id = ?',
@@ -858,6 +938,8 @@ export function submitStockTake(db, { takeId, items }) {
     const updBatch = db.prepare('UPDATE inventory_batches SET quantity = ? WHERE id = ?')
     for (const r of rows) updBatch.run(r.actual_qty, r.batch_id)
     db.prepare("UPDATE stock_takes SET status = '已完成', completed_at = ? WHERE id = ?").run(now(), takeId)
+    const take = db.prepare('SELECT take_no FROM stock_takes WHERE id = ?').get(takeId)
+    logAudit(db, '盘点', take?.take_no ?? `盘点单#${takeId}`, { counted: rows.length }, operator)
   })
 }
 
@@ -1000,6 +1082,8 @@ export function receivePurchaseOrder(db, { id, items, operator }) {
         line.received_qty + it.quantity,
         line.id,
       )
+      logAudit(db, '采购收货', `${line.product_desc} x${it.quantity}`,
+        { poNo: po.po_no, batchNo, quantity: it.quantity, unitCost: line.unit_cost }, operator)
     }
 
     // 全部明细收齐 → 已完成，否则 → 部分收货
@@ -1045,16 +1129,19 @@ function assertPriceLevel(v) {
   }
 }
 
-export function setPriceTier(db, { productId, tier, price }) {
+export function setPriceTier(db, { productId, tier, price, operator }) {
   if (!PRICE_TIERS.includes(tier)) throw new Error(`价格档次必须是：${PRICE_TIERS.join(' / ')}，收到：${tier}`)
   assertPositiveInt(price, '档次价格')
-  const prod = db.prepare('SELECT id FROM products WHERE id = ?').get(productId)
+  const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(productId)
   if (!prod) throw new Error('商品不存在')
-  db.prepare(
-    `INSERT INTO price_tiers (product_id, tier, price) VALUES (?, ?, ?)
-     ON CONFLICT(product_id, tier) DO UPDATE SET price = excluded.price`,
-  ).run(productId, tier, price)
-  return db.prepare('SELECT * FROM price_tiers WHERE product_id = ? AND tier = ?').get(productId, tier)
+  return inTransaction(db, () => {
+    db.prepare(
+      `INSERT INTO price_tiers (product_id, tier, price) VALUES (?, ?, ?)
+       ON CONFLICT(product_id, tier) DO UPDATE SET price = excluded.price`,
+    ).run(productId, tier, price)
+    logAudit(db, '改价', productLabel(prod), { tier, price }, operator)
+    return db.prepare('SELECT * FROM price_tiers WHERE product_id = ? AND tier = ?').get(productId, tier)
+  })
 }
 
 export function deletePriceTier(db, { productId, tier }) {
@@ -1138,4 +1225,137 @@ export function importBatch(db, { rows }) {
     }
     return { ok: true, imported: results.length, skipped, results }
   })
+}
+
+// ---------- 分级库存预警 ----------
+// 口径（全站统一）：商品总库存 < COALESCE(products.min_stock, 默认阈值) 即预警；
+// min_stock 为 NULL 表示没单独设过，用默认阈值。仪表盘/库存页/手机端共用这一口径。
+
+export const DEFAULT_MIN_STOCK = 5
+
+/** 低库存商品列表：总库存 < 各自预警线（min_stock ?? 默认），升序，最缺的在前 */
+export function lowStockProducts(db) {
+  return db
+    .prepare(
+      `SELECT p.id, p.sku_code, p.brand, p.model, p.location, p.min_stock,
+              COALESCE(s.q, 0) AS stock, COALESCE(p.min_stock, ?) AS threshold
+       FROM products p
+       LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
+         ON s.product_id = p.id
+       WHERE COALESCE(s.q, 0) < COALESCE(p.min_stock, ?)
+       ORDER BY stock ASC, p.id ASC`,
+    )
+    .all(DEFAULT_MIN_STOCK, DEFAULT_MIN_STOCK)
+}
+
+// ---------- 过期预警（饵料等保质期商品） ----------
+
+/**
+ * 解析保质期文本为本地日期（只认两种写法，其余返回 null 跳过）：
+ * 'YYYY-MM' → 当月最后一天（保质"到几月"的常识口径）；'YYYY-MM-DD' → 当天
+ */
+function parseExpiryDate(s) {
+  const text = String(s ?? '').trim()
+  let m = /^(\d{4})-(\d{2})$/.exec(text)
+  if (m) return new Date(Number(m[1]), Number(m[2]), 0) // 当月最后一天
+  m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return null
+}
+
+/**
+ * 临期/过期商品：expiry_date 在未来 N 天内（含已过期），且当前库存 > 0，按过期日升序。
+ * 返回：名称/SKU/过期日/剩余天数（负=已过期）/库存量/expired 标记
+ */
+export function expiringProducts(db, { days = 30 } = {}) {
+  const n = Math.max(parseInt(days, 10) || 30, 0)
+  const rows = db
+    .prepare(
+      `SELECT p.id, p.sku_code, p.brand, p.model, p.expiry_date, COALESCE(s.q, 0) AS stock
+       FROM products p
+       LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
+         ON s.product_id = p.id
+       WHERE p.expiry_date IS NOT NULL AND p.expiry_date <> '' AND COALESCE(s.q, 0) > 0`,
+    )
+    .all()
+  const todayMid = new Date()
+  todayMid.setHours(0, 0, 0, 0)
+  const out = []
+  for (const r of rows) {
+    const exp = parseExpiryDate(r.expiry_date)
+    if (!exp) continue // 无法识别的保质期写法不参与预警
+    const daysLeft = Math.round((exp.getTime() - todayMid.getTime()) / 86400000)
+    if (daysLeft > n) continue
+    out.push({
+      id: r.id,
+      name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
+      sku: r.sku_code,
+      expiry_date: r.expiry_date,
+      daysLeft,
+      expired: daysLeft < 0,
+      stock: r.stock,
+      _sort: exp.getTime(),
+    })
+  }
+  out.sort((a, b) => a._sort - b._sort)
+  return out.map(({ _sort, ...rest }) => rest)
+}
+
+// ---------- 供应商对账 ----------
+
+/**
+ * 供应商对账单：
+ * - lines：该供应商的进货批次明细（时间/商品/进货数量/成本价/金额/批次号/关联采购单号）。
+ *   进货数量取 type='in' 的入库流水（批次原始数量），批次当前剩余另附 remaining；
+ *   采购收货的流水 notes 形如"采购收货 PO20260728-001"，从中提取关联采购单号。
+ * - 汇总：总进货金额/总件数/最近一次进货时间/待收采购单金额
+ *   （待收=状态 sent/partial 的采购单里 Σ(订-已收)×进价，单位分）。
+ */
+export function supplierStatement(db, { supplierId }) {
+  const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(supplierId)
+  if (!supplier) throw new Error('供应商不存在')
+  const lines = db
+    .prepare(
+      `SELECT b.id AS batch_id, b.batch_no, b.inbound_date, b.cost_price, b.quantity AS remaining,
+              p.id AS product_id, p.brand, p.model, p.sku_code,
+              t.quantity AS in_qty, t.timestamp, t.notes
+       FROM inventory_batches b
+       JOIN products p ON p.id = b.product_id
+       LEFT JOIN transactions t ON t.batch_id = b.id AND t.type = 'in'
+       WHERE b.supplier_id = ?
+       ORDER BY b.inbound_date ASC, b.id ASC`,
+    )
+    .all(supplierId)
+    .map((r) => {
+      const quantity = r.in_qty ?? r.remaining // 找不到入库流水时退化为批次当前剩余
+      const poMatch = /采购收货\s+(PO\d{8}-\d{3})/.exec(r.notes ?? '')
+      return {
+        batch_id: r.batch_id,
+        batch_no: r.batch_no,
+        date: r.inbound_date,
+        product_id: r.product_id,
+        product_name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
+        sku: r.sku_code,
+        quantity,
+        remaining: r.remaining,
+        cost_price: r.cost_price,
+        amount: quantity * r.cost_price,
+        po_no: poMatch ? poMatch[1] : null,
+      }
+    })
+  const pending = db
+    .prepare(
+      `SELECT COALESCE(SUM((i.quantity - i.received_qty) * i.unit_cost), 0) AS amount
+       FROM purchase_order_items i JOIN purchase_orders po ON po.id = i.po_id
+       WHERE po.supplier_id = ? AND po.status IN ('sent', 'partial')`,
+    )
+    .get(supplierId).amount
+  return {
+    supplier,
+    lines,
+    totalAmount: lines.reduce((s, l) => s + l.amount, 0),
+    totalQty: lines.reduce((s, l) => s + l.quantity, 0),
+    lastInboundAt: lines.length > 0 ? lines[lines.length - 1].date : null,
+    pendingPoAmount: pending,
+  }
 }

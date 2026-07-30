@@ -165,6 +165,18 @@ CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders(status);
 CREATE INDEX IF NOT EXISTS idx_po_items_po ON purchase_order_items(po_id);
 CREATE INDEX IF NOT EXISTS idx_price_tiers_product ON price_tiers(product_id);
 
+-- 操作日志：关键写操作留痕（谁/什么时候/对什么/做了什么），与业务写入同事务提交
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    entity TEXT,
+    detail TEXT,
+    operator TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);
+
 -- AI 记忆：对话历史（只存 user/assistant）与自主沉淀的经营知识
 CREATE TABLE IF NOT EXISTS ai_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +217,7 @@ export function openDatabase(dbPath) {
   migrateCreditPack(db)
   migrateFishingAttrs(db)
   migrateCustomerPriceLevel(db)
+  migrateMinStock(db)
   const row = db.prepare('SELECT COUNT(*) AS n FROM products').get()
   if (row.n === 0) seedDatabase(db)
   return db
@@ -321,6 +334,13 @@ function migrateCustomerPriceLevel(db) {
     if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
   }
   addCol('customers', 'price_level', 'price_level TEXT')
+}
+
+// ---------- 分级库存预警迁移：老库 products 补 min_stock（只增不改；NULL=用默认阈值 5） ----------
+// 注意：migrateOldProductsTable 重建的 products_new 也不含 min_stock，靠这里统一补上
+function migrateMinStock(db) {
+  const cols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name)
+  if (!cols.includes('min_stock')) db.exec('ALTER TABLE products ADD COLUMN min_stock INTEGER')
 }
 
 /** 软件正常退出时调用一次：收尾 checkpoint，截断 WAL */

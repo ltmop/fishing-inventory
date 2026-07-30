@@ -43,6 +43,20 @@ export function csvCell(v: string | number): string {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
+/** 大白话相对时间（备份状态用）：今天 03:00 / 昨天 03:00 / X 天前 */
+export function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return '还没有过'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const now = new Date()
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000)
+  const hm = formatTime(iso)
+  if (dayDiff <= 0) return `今天 ${hm}`
+  if (dayDiff === 1) return `昨天 ${hm}`
+  return `${dayDiff} 天前`
+}
+
 export function todayStr(): string {
   const d = new Date()
   const pad = (n: number) => String(n).padStart(2, '0')

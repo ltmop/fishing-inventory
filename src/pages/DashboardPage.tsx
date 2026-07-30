@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'motion/react'
 import {
   Box,
+  CalendarClock,
   Package,
   PackagePlus,
   PackageMinus,
@@ -26,6 +27,8 @@ import {
 } from 'recharts'
 import { useAppStore } from '@/store/appStore'
 import { formatPrice, formatTime, isToday, productName } from '@/lib/formatters'
+import { computeExpiring } from '@/lib/expiry'
+import type { ExpiringProduct } from '@/types'
 import { useCountUp } from '@/lib/useCountUp'
 import { backend } from '@/lib/api'
 import { Sparkles } from 'lucide-react'
@@ -150,6 +153,22 @@ export function DashboardPage() {
     void loadPurchaseOrders().catch(() => {})
   }, [loadPurchaseOrders])
 
+  // 临期/过期商品：Electron 走 product:expiring（后端口径），浏览器 mock 本地算（同口径）
+  const [expiringRemote, setExpiringRemote] = useState<ExpiringProduct[] | null>(null)
+  useEffect(() => {
+    if (!backend) return
+    backend
+      .invoke('product:expiring', { days: 30 })
+      .then(setExpiringRemote)
+      .catch(() => setExpiringRemote([]))
+  }, [])
+  const expiringList = useMemo(
+    () => (backend ? (expiringRemote ?? []) : computeExpiring(products, totalStockOf, 30)),
+    [expiringRemote, products, totalStockOf],
+  )
+  const expiringCount = expiringList.length
+  const expiredCount = expiringList.filter((e) => e.expired).length
+
   const pendingPOCount = useMemo(
     () => purchaseOrders.filter((o) => o.status === 'sent' || o.status === 'partial').length,
     [purchaseOrders],
@@ -164,7 +183,7 @@ export function DashboardPage() {
       .filter((t) => t.type === 'out' && isToday(t.timestamp))
       .reduce((s, t) => s + t.quantity, 0)
     const pendingCount = products.filter((p) => p.status === '待盘点').length
-    const lowStockCount = products.filter((p) => totalStockOf(p.id) < LOW_STOCK_THRESHOLD).length
+    const lowStockCount = products.filter((p) => totalStockOf(p.id) < (p.min_stock ?? LOW_STOCK_THRESHOLD)).length
     // 滞销：有库存但最近 90 天没有出库记录
     const slowCount = products.filter((p) => {
       if (totalStockOf(p.id) <= 0) return false
@@ -251,8 +270,8 @@ export function DashboardPage() {
     // 库存告急的前 3 个
     const lowStock = products
       .filter((p) => p.status !== '停产')
-      .map((p) => ({ name: productName(p), total: totalStockOf(p.id) }))
-      .filter((x) => x.total < LOW_STOCK_THRESHOLD)
+      .map((p) => ({ name: productName(p), total: totalStockOf(p.id), threshold: p.min_stock ?? LOW_STOCK_THRESHOLD }))
+      .filter((x) => x.total < x.threshold)
       .sort((a, b) => a.total - b.total)
       .slice(0, 3)
     setAiLoading(true)
@@ -317,6 +336,15 @@ export function DashboardPage() {
       cardClass: 'bg-red-50', iconClass: 'bg-red-100 text-red-600', numClass: 'text-red-600',
       pulse: stats.lowStockCount > 0,
       action: () => navigate('/inventory?filter=low'), actionHint: '去补货' },
+    // 临期商品：0 个时是绿色安心态；有已过期时数字变红
+    { title: '临期商品', value: expiringCount, format: int,
+      unit: expiringCount === 0 ? '没有临期商品' : expiredCount > 0 ? `其中 ${expiredCount} 个已过期` : '30 天内到期',
+      icon: CalendarClock,
+      cardClass: expiringCount === 0 ? 'bg-green-50' : 'bg-amber-50',
+      iconClass: expiringCount === 0 ? 'bg-green-100 text-green-600' : 'bg-amber-100 text-amber-600',
+      numClass: expiredCount > 0 ? 'text-red-600' : expiringCount === 0 ? 'text-green-600' : 'text-amber-600',
+      pulse: expiredCount > 0,
+      action: () => navigate('/inventory?filter=expiring'), actionHint: expiringCount > 0 ? '去处理' : '查看' },
     { title: '滞销品', value: stats.slowCount, format: int, unit: `>${SLOW_DAYS}天未动销`, icon: Snail,
       cardClass: 'bg-slate-100', iconClass: 'bg-slate-200 text-slate-500', numClass: 'text-slate-500',
       action: () => navigate('/inventory'), actionHint: '查看' },

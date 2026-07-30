@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type {
+  AuditLogEntry,
   Category,
   Customer,
   CustomerStatement,
@@ -18,6 +19,8 @@ import type {
   StockTake,
   StockTakeItem,
   Supplier,
+  SupplierStatement,
+  SupplierStatementLine,
   Transaction,
 } from '@/types'
 import { computeFifoPlan, type FifoAllocation } from '@/lib/fifo'
@@ -53,6 +56,8 @@ export interface NewProductInput {
   color?: string | null
   material?: string | null
   expiry_date?: string | null
+  /** 最低库存预警线（选填）：不设/清空 = 按默认阈值 5 预警 */
+  min_stock?: number | null
 }
 
 export type FontSizeMode = 'normal' | 'large'
@@ -127,6 +132,8 @@ interface AppState {
   purchaseOrderItems: PurchaseOrderItemDetail[]
   /** 全部商品的价格档次（loadAll 已带；mock 路径本地维护） */
   priceTiers: PriceTier[]
+  /** 操作日志（audit:list 口径，时间倒序）；mock 路径写操作时本地顺手记，生产环境一律以后端 audit_log 表为准 */
+  auditLogs: AuditLogEntry[]
   /** Electron 环境下是否已从 SQLite 加载完数据 */
   loaded: boolean
   /** 数据加载/操作失败的提示，展示在布局顶部错误条 */
@@ -228,6 +235,11 @@ interface AppState {
   }) => Promise<{ outstanding: number; overpaid: boolean; prepaid: boolean }>
   /** 客户对账单：赊销明细 + 还款记录 + 汇总 */
   customerStatement: (customerId: number) => Promise<CustomerStatement>
+
+  /** 拉取操作日志（audit:list，最近 200 条，可按 action 筛选）；mock 路径本地已有全量，无需拉取 */
+  loadAuditLogs: (action?: string) => Promise<void>
+  /** 供应商对账单：进货明细 + 汇总 + 待收采购单金额 */
+  supplierStatement: (supplierId: number) => Promise<SupplierStatement>
 
   createStockTake: (
     locationFilter: string | null,
@@ -352,6 +364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   purchaseOrders: [],
   purchaseOrderItems: [],
   priceTiers: [],
+  auditLogs: [],
   loaded: false,
   error: null,
   lowStockAlertOpen: false,
@@ -411,6 +424,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       rod_action: input.rod_action ?? null,
       power_rating: input.power_rating ?? null,
       expiry_date: input.expiry_date ?? null,
+      min_stock: input.min_stock ?? null,
       created_at: now,
       updated_at: now,
     }
@@ -476,9 +490,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       operator,
       notes: null,
     }
+    // mock 路径顺手记一条操作日志（生产环境以后端 audit_log 表为准）
+    const audit: AuditLogEntry = {
+      id: nextId(state.auditLogs),
+      action: '入库',
+      entity: `${productName(state.products.find((p) => p.id === productId) ?? { brand: null, model: null, sku_code: `#${productId}` })} x${quantity}`,
+      detail: JSON.stringify({ quantity, costPrice }),
+      operator,
+      created_at: transaction.timestamp,
+    }
     set((s) => ({
       batches: [...s.batches, batch],
       transactions: [transaction, ...s.transactions],
+      auditLogs: [audit, ...s.auditLogs],
       products: s.products.map((p) =>
         p.id === productId ? { ...p, cost_price: costPrice, updated_at: transaction.timestamp } : p,
       ),
@@ -547,11 +571,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     const deductBy = new Map(plan.allocations.map((a) => [a.batch_id, a.remaining_after]))
     const transactions = [...newTxs].reverse().concat(state.transactions)
+    // mock 路径顺手记一条操作日志（生产环境以后端 audit_log 表为准）
+    const audit: AuditLogEntry = {
+      id: nextId(state.auditLogs),
+      action: '出库',
+      entity: `${productName(state.products.find((p) => p.id === productId) ?? { brand: null, model: null, sku_code: `#${productId}` })} x${quantity}`,
+      detail: JSON.stringify({
+        quantity,
+        sellingPrice: price ?? null,
+        totalDue,
+        paidAmount: isCredit ? paidAmount : null,
+        creditAmount: isCredit && totalDue != null && paidAmount != null ? totalDue - paidAmount : 0,
+      }),
+      operator,
+      created_at: now,
+    }
     set((s) => ({
       batches: s.batches.map((b) =>
         deductBy.has(b.id) ? { ...b, quantity: deductBy.get(b.id)! } : b,
       ),
       transactions,
+      auditLogs: [audit, ...s.auditLogs],
       customers:
         credit?.customerId != null
           ? computeCustomerStats(s.customers, transactions, s.payments)
@@ -1119,7 +1159,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const payments = [...s.payments, payment]
     const customers = computeCustomerStats(s.customers, s.transactions, payments)
-    set({ payments, customers })
+    // mock 路径顺手记一条操作日志（生产环境以后端 audit_log 表为准）
+    const audit: AuditLogEntry = {
+      id: nextId(s.auditLogs),
+      action: '还账',
+      entity: `${cust.name} 还 ${(amount / 100).toFixed(2)} 元`,
+      detail: JSON.stringify({ amount, method, before: cust.outstanding, outstanding: cust.outstanding - amount }),
+      operator: null,
+      created_at: payment.created_at,
+    }
+    set({ payments, customers, auditLogs: [audit, ...s.auditLogs] })
     const outstanding = customers.find((c) => c.id === customerId)!.outstanding
     return { outstanding, overpaid: amount > Math.max(cust.outstanding, 0), prepaid: outstanding < 0 }
   },
@@ -1164,6 +1213,63 @@ export const useAppStore = create<AppState>((set, get) => ({
       total_credit: cust.total_credit,
       total_paid_back: cust.total_paid_back,
       outstanding: cust.outstanding,
+    }
+  },
+
+  loadAuditLogs: async (action) => {
+    if (backend) {
+      const list = await backend.invoke('audit:list', { limit: 200, ...(action ? { action } : {}) })
+      set({ auditLogs: list })
+    }
+    // mock 回退路径：auditLogs 已在 state 里本地维护，无需拉取
+  },
+
+  supplierStatement: async (supplierId) => {
+    if (backend) return backend.invoke('supplier:statement', { supplierId })
+    // mock 回退路径本地拼对账单（口径参照后端 supplierStatement；生产环境以后端为准）
+    const s = get()
+    const supplier = s.suppliers.find((x) => x.id === supplierId)
+    if (!supplier) throw new Error('供应商不存在')
+    const lines: SupplierStatementLine[] = s.batches
+      .filter((b) => b.supplier_id === supplierId)
+      .map((b) => {
+        const p = s.products.find((x) => x.id === b.product_id)
+        const tx = s.transactions.find((t) => t.batch_id === b.id && t.type === 'in')
+        const quantity = tx?.quantity ?? b.quantity // 找不到入库流水时退化为批次当前剩余
+        const poMatch = /采购收货\s+(PO\d{8}-\d{3})/.exec(tx?.notes ?? '')
+        return {
+          batch_id: b.id,
+          batch_no: b.batch_no,
+          date: b.inbound_date,
+          product_id: b.product_id,
+          product_name: p ? productName(p) : `#${b.product_id}`,
+          sku: p?.sku_code ?? '',
+          quantity,
+          remaining: b.quantity,
+          cost_price: b.cost_price,
+          amount: quantity * b.cost_price,
+          po_no: poMatch ? poMatch[1] : null,
+        }
+      })
+      .sort((a, b) => a.date.localeCompare(b.date) || a.batch_id - b.batch_id)
+    // 待收=状态 sent/partial 的采购单里 Σ(订-已收)×进价
+    const pendingPoAmount = s.purchaseOrders
+      .filter((o) => o.supplier_id === supplierId && (o.status === 'sent' || o.status === 'partial'))
+      .reduce(
+        (sum, o) =>
+          sum +
+          s.purchaseOrderItems
+            .filter((it) => it.po_id === o.id)
+            .reduce((x, it) => x + (it.quantity - it.received_qty) * it.unit_cost, 0),
+        0,
+      )
+    return {
+      supplier,
+      lines,
+      totalAmount: lines.reduce((x, l) => x + l.amount, 0),
+      totalQty: lines.reduce((x, l) => x + l.quantity, 0),
+      lastInboundAt: lines.length > 0 ? lines[lines.length - 1].date : null,
+      pendingPoAmount,
     }
   },
 

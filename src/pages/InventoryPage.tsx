@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ChevronDown, ChevronRight, Download, Loader2, Pencil, Search, Tag, Trash2, TriangleAlert, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
+import { ChevronDown, ChevronRight, CalendarClock, Download, Loader2, Pencil, Search, Tag, Trash2, TriangleAlert, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { PriceLabelDialog } from '@/components/PriceLabel'
 import { formatDate, formatPrice, productName, csvCell } from '@/lib/formatters'
+import { computeExpiring } from '@/lib/expiry'
 import {
   SPEC_FIELDS, SPEC_LABELS, SPEC_PLACEHOLDERS, collectSpecs, formatSpecs,
   specFieldsFor, specsToForm, type SpecField,
@@ -72,6 +73,7 @@ export function InventoryPage() {
   const totalStockOf = useAppStore((s) => s.totalStockOf)
   const batchesOf = useAppStore((s) => s.batchesOf)
   const suppliers = useAppStore((s) => s.suppliers)
+  const batches = useAppStore((s) => s.batches)
 
   const [keyword, setKeyword] = useState('')
   const [debouncedKeyword, setDebouncedKeyword] = useState('')
@@ -79,12 +81,22 @@ export function InventoryPage() {
   const [status, setStatus] = useState(ALL)
   // 低库存快捷筛选：仪表盘「低库存」卡片跳转过来时自动开启
   const [lowOnly, setLowOnly] = useState(false)
+  // 临期快捷筛选：仪表盘「临期商品」卡片跳转过来时自动开启
+  const [expiringOnly, setExpiringOnly] = useState(false)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [searchParams] = useSearchParams()
 
-  // 仪表盘跳转参数：?filter=low 只看低库存；?status=待盘点 按状态筛选（仅初始化一次）
+  // 临期/过期商品（productId → 详情）：行徽章 + 临期筛选共用；与后端 product:expiring 同口径本地算
+  const expiringMap = useMemo(
+    () => new Map(computeExpiring(products, totalStockOf, 30).map((e) => [e.id, e])),
+    [products, batches, totalStockOf], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+
+  // 仪表盘跳转参数：?filter=low 只看低库存；?filter=expiring 只看临期；?status=待盘点 按状态筛选（仅初始化一次）
   useEffect(() => {
-    if (searchParams.get('filter') === 'low') setLowOnly(true)
+    const f = searchParams.get('filter')
+    if (f === 'low') setLowOnly(true)
+    if (f === 'expiring') setExpiringOnly(true)
     const st = searchParams.get('status')
     if (st && (PRODUCT_STATUSES as string[]).includes(st)) setStatus(st)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -100,6 +112,7 @@ export function InventoryPage() {
       setCategory(ALL)
       setStatus(ALL)
       setLowOnly(false)
+      setExpiringOnly(false)
     }
   }, [searchParams])
 
@@ -135,6 +148,7 @@ export function InventoryPage() {
     suggest_price: '',
     location: '',
     status: '' as ProductStatus | '',
+    min_stock: '', // 安全库存：空串=不单独设，按默认 5 预警
   })
   // 渔具规格表单（按品类出不同字段，全部选填）
   const [specForm, setSpecForm] = useState<Record<SpecField, string>>(
@@ -156,6 +170,7 @@ export function InventoryPage() {
       suggest_price: p.suggest_price !== null ? (p.suggest_price / 100).toString() : '',
       location: p.location ?? '',
       status: p.status,
+      min_stock: p.min_stock !== null ? String(p.min_stock) : '',
     })
     setSpecForm(specsToForm(p))
     const tiers = emptyTierForm()
@@ -184,6 +199,17 @@ export function InventoryPage() {
       setPageError('品类和状态不能为空')
       return
     }
+    // 安全库存：留空=不单独设（按默认 5）；填了必须是 ≥0 的整数
+    const minStockRaw = form.min_stock.trim()
+    let minStock: number | null = null
+    if (minStockRaw !== '') {
+      const n = Number(minStockRaw)
+      if (!Number.isInteger(n) || n < 0) {
+        setPageError('安全库存要是 0 或更大的整数（不想单独设就留空）')
+        return
+      }
+      minStock = n
+    }
     // 价格档次校验：空着=没设这档；填了必须是 >0 的数
     const tierPrices = new Map<PriceLevel, number>()
     for (const t of PRICE_LEVELS) {
@@ -207,6 +233,7 @@ export function InventoryPage() {
         suggest_price: suggest,
         location: form.location.trim() || null,
         status: form.status as ProductStatus,
+        min_stock: minStock,
         ...collectSpecs(specForm),
       })
       // 价格档次落库：填了的 set（新增/覆盖），清空了的 delete
@@ -251,7 +278,8 @@ export function InventoryPage() {
     return products.filter((p) => {
       if (category !== ALL && p.category !== (category as Category)) return false
       if (status !== ALL && p.status !== (status as ProductStatus)) return false
-      if (lowOnly && totalStockOf(p.id) >= LOW_STOCK_THRESHOLD) return false
+      if (lowOnly && totalStockOf(p.id) >= (p.min_stock ?? LOW_STOCK_THRESHOLD)) return false
+      if (expiringOnly && !expiringMap.has(p.id)) return false
       if (debouncedKeyword) {
         const kw = debouncedKeyword.toLowerCase()
         // 规格字段（长度/调性/线号等）也纳入搜索：搜"3.6"能找到 3.6m 的竿
@@ -266,7 +294,7 @@ export function InventoryPage() {
       }
       return true
     })
-  }, [products, category, status, debouncedKeyword, lowOnly, totalStockOf])
+  }, [products, category, status, debouncedKeyword, lowOnly, expiringOnly, expiringMap, totalStockOf])
 
   // 表头排序（纯前端，不动数据层）：主表按总库存，批次子表按数量/单价/入库日期
   const [stockSort, setStockSort] = useState<SortDir | null>(null)
@@ -402,10 +430,19 @@ export function InventoryPage() {
           <Button
             variant={lowOnly ? 'destructive' : 'outline'}
             onClick={() => setLowOnly((v) => !v)}
-            title={`只看库存不足 ${LOW_STOCK_THRESHOLD} 件的商品`}
+            title="只看库存低于预警线的商品（未单独设置预警线的按 5 件算）"
           >
             <TriangleAlert className="size-4" />
             低库存
+          </Button>
+          <Button
+            variant="outline"
+            className={expiringOnly ? 'border-amber-500 bg-amber-500 text-white hover:bg-amber-600 hover:text-white' : ''}
+            onClick={() => setExpiringOnly((v) => !v)}
+            title="只看 30 天内到期或已经过期的商品"
+          >
+            <CalendarClock className="size-4" />
+            临期
           </Button>
           <span className="text-sm text-muted-foreground">共 {filtered.length} 个商品</span>
         </CardContent>
@@ -447,7 +484,7 @@ export function InventoryPage() {
               <TableBody>
                 {sorted.map((p) => {
                   const total = totalStockOf(p.id)
-                  const low = total < LOW_STOCK_THRESHOLD
+                  const low = total < (p.min_stock ?? LOW_STOCK_THRESHOLD)
                   const isOpen = expanded.has(p.id)
                   return (
                     <Fragment key={p.id}>
@@ -469,7 +506,25 @@ export function InventoryPage() {
                         <TableCell className="py-1.5 font-mono text-xs">{p.sku_code}</TableCell>
                         <TableCell className="py-1.5">{p.category}</TableCell>
                         <TableCell className="py-1.5">{p.brand ?? '—'}</TableCell>
-                        <TableCell className="py-1.5">{p.model ?? '—'}</TableCell>
+                        <TableCell className="py-1.5">
+                          {p.model ?? '—'}
+                          {(() => {
+                            const ex = expiringMap.get(p.id)
+                            if (!ex) return null
+                            return (
+                              <Badge
+                                className={`ml-2 ${ex.expired ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}
+                                title={`保质期到 ${ex.expiry_date}`}
+                              >
+                                {ex.expired
+                                  ? '已过期'
+                                  : ex.daysLeft === 0
+                                    ? '今天过期'
+                                    : `${ex.daysLeft} 天后过期`}
+                              </Badge>
+                            )
+                          })()}
+                        </TableCell>
                         <TableCell className="py-1.5">
                           <Badge className={STATUS_BADGE_CLASS[p.status]}>{p.status}</Badge>
                         </TableCell>
@@ -685,6 +740,18 @@ export function InventoryPage() {
               <Input
                 value={form.location}
                 onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))}
+              />
+            </div>
+            {/* 安全库存：饵料/鱼钩这类消耗快的老板可以自己调大；留空按默认 5 */}
+            <div className="space-y-2">
+              <Label>安全库存</Label>
+              <Input
+                type="number"
+                min="0"
+                step="1"
+                value={form.min_stock}
+                onChange={(e) => setForm((f) => ({ ...f, min_stock: e.target.value }))}
+                placeholder="低于这个数就提醒你，默认 5"
               />
             </div>
             <div className="space-y-2">

@@ -123,6 +123,8 @@ export function InboundPage() {
   const [npCostYuan, setNpCostYuan] = useState('')
   const [npSuggestYuan, setNpSuggestYuan] = useState('')
   const [npLocation, setNpLocation] = useState('')
+  // 安全库存：空串=不单独设，按默认 5 预警（饵料/鱼钩这类消耗快的老板自己调大）
+  const [npMinStock, setNpMinStock] = useState('')
   // 渔具规格（按品类出不同字段，全部选填）
   const [npSpecs, setNpSpecs] = useState<Record<SpecField, string>>(emptySpecs)
 
@@ -235,6 +237,17 @@ export function InboundPage() {
       setError('新建商品：建议售价格式不正确')
       return
     }
+    // 安全库存：留空=默认 5；填了必须是 ≥0 的整数
+    const minStockRaw = npMinStock.trim()
+    let minStock: number | null = null
+    if (minStockRaw !== '') {
+      const n = Number(minStockRaw)
+      if (!Number.isInteger(n) || n < 0) {
+        setError('新建商品：安全库存要是 0 或更大的整数（不想单独设就留空）')
+        return
+      }
+      minStock = n
+    }
     // SKU 留空，由后端（浏览器预览时为 mock 路径）按统一的五段式规则自动生成
     const brand = npBrand === '__custom__'
       ? (npBrandCustom.trim() || null)
@@ -253,6 +266,7 @@ export function InboundPage() {
         suggest_price: suggest,
         location: npLocation.trim() || null,
         status: '待盘点',
+        min_stock: minStock,
         // 只提交当前品类展示的规格字段，避免切换品类后残留旧值混进来
         ...Object.fromEntries(
           specFieldsFor(npCategory).map((f) => [f, npSpecs[f].trim() || null]),
@@ -686,6 +700,17 @@ export function InboundPage() {
             <div className="space-y-1">
               <Label>货位</Label>
               <Input value={npLocation} onChange={(e) => setNpLocation(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>安全库存</Label>
+              <Input
+                type="number"
+                min="0"
+                step="1"
+                value={npMinStock}
+                onChange={(e) => setNpMinStock(e.target.value)}
+                placeholder="低于这个数就提醒你，默认 5"
+              />
             </div>
             {/* 渔具规格：按品类出不同字段，全部选填，不填也能入库 */}
             <div className="col-span-2 space-y-2 border-t pt-3">

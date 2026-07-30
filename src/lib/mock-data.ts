@@ -1,4 +1,5 @@
 import type {
+  AuditLogEntry,
   Customer,
   InventoryBatch,
   Payment,
@@ -22,6 +23,10 @@ function daysAgo(n: number, hour = 10, minute = 0): string {
 function dateDaysAgo(n: number): string {
   return daysAgo(n).slice(0, 10)
 }
+// 相对今天 n 天后的日期串 YYYY-MM-DD（n 为负=已过期），给临期/过期 mock 商品用
+function dateInDays(n: number): string {
+  return dateDaysAgo(-n)
+}
 
 export const mockSuppliers: Supplier[] = [
   { id: 1, name: '威海光威渔具集团', contact: '王经理', phone: '0631-5628888', address: '山东省威海市环翠区渔具产业园', notes: '月结30天，主打台钓竿' },
@@ -31,18 +36,21 @@ export const mockSuppliers: Supplier[] = [
 ]
 
 export const mockProducts: Product[] = [
-  { id: 1, sku_code: 'JC-FG-SG-GW-36', barcode: '6923456789012', category: '鱼竿', sub_category: '手竿', brand: '光威', model: '赤刃 3.6m 28调', cost_price: 4200, suggest_price: 8500, location: 'A区-东墙-第2层', photo_path: null, name_vi: null, rod_length: '3.6m', line_number: null, hook_size: null, color: null, material: '碳素', rod_action: '28调', power_rating: null, expiry_date: null, status: '已盘点', created_at: daysAgo(30), updated_at: daysAgo(2) },
-  { id: 2, sku_code: 'JC-FG-SG-HS-45', barcode: '6923456789029', category: '鱼竿', sub_category: '手竿', brand: '化氏', model: '一味 4.5m 28调', cost_price: 6800, suggest_price: 12800, location: 'A区-东墙-第3层', photo_path: null, name_vi: null, rod_length: '4.5m', line_number: null, hook_size: null, color: null, material: '碳素', rod_action: '28调', power_rating: null, expiry_date: null, status: '已盘点', created_at: daysAgo(28), updated_at: daysAgo(5) },
-  { id: 3, sku_code: 'JC-FG-LY-DYW-21', barcode: '6923456789036', category: '鱼竿', sub_category: '路亚竿', brand: '达亿瓦', model: '一击 2.1m ML调 枪柄', cost_price: 15500, suggest_price: 26800, location: 'A区-西墙-第1层', photo_path: null, name_vi: null, rod_length: '2.1m', line_number: null, hook_size: null, color: null, material: null, rod_action: 'ML调', power_rating: 'ML', expiry_date: null, status: '已上架虾皮', created_at: daysAgo(25), updated_at: daysAgo(3) },
-  { id: 4, sku_code: 'JC-FG-HG-LW-30', barcode: '6923456789043', category: '鱼竿', sub_category: '海竿', brand: '狼王', model: '远投 3.0m', cost_price: 5500, suggest_price: 9900, location: 'B区-1号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '待盘点', created_at: daysAgo(22), updated_at: daysAgo(8) },
-  { id: 5, sku_code: 'JC-YL-FC-XMN-2500', barcode: '6923456789050', category: '渔轮', sub_category: '纺车轮', brand: '禧玛诺', model: '纳西 2500HG', cost_price: 32000, suggest_price: 49800, location: 'B区-3号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '已上架虾皮', created_at: daysAgo(20), updated_at: daysAgo(1) },
-  { id: 6, sku_code: 'JC-YL-SD-AB-001', barcode: '6923456789067', category: '渔轮', sub_category: '水滴轮', brand: '阿布加西亚', model: 'BMAX3 右握', cost_price: 21000, suggest_price: 33800, location: 'B区-3号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '待盘点', created_at: daysAgo(18), updated_at: daysAgo(6) },
-  { id: 7, sku_code: 'JC-XL-PE-YGK-1.5', barcode: '6923456789074', category: '鱼线', sub_category: 'PE线', brand: 'YGK', model: 'PE线 1.5号 200m', cost_price: 1800, suggest_price: 3500, location: 'C区-线材架-第1层', photo_path: null, name_vi: null, rod_length: null, line_number: '1.5号', hook_size: null, color: '五彩', material: 'PE', rod_action: null, power_rating: null, expiry_date: null, status: '已盘点', created_at: daysAgo(15), updated_at: daysAgo(2) },
-  { id: 8, sku_code: 'JC-JL-MN-MB-009', barcode: '6923456789081', category: '路亚假饵', sub_category: '米诺', brand: 'Megabass', model: '米诺 9cm 金鳞', cost_price: 1200, suggest_price: 2800, location: 'C区-饵盒-A3', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '已上架虾皮', created_at: daysAgo(15), updated_at: daysAgo(4) },
-  { id: 9, sku_code: 'JC-YG-YS-TFF-05', barcode: '6923456789098', category: '鱼钩', sub_category: '伊势尼', brand: '土肥富', model: '伊势尼 5号 10枚装', cost_price: 300, suggest_price: 800, location: 'C区-钩架-第2层', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: '5号', color: null, material: '高碳钢', rod_action: null, power_rating: null, expiry_date: null, status: '已盘点', created_at: daysAgo(14), updated_at: daysAgo(7) },
-  { id: 10, sku_code: 'JC-FP-LP-AL-001', barcode: '6923456789104', category: '浮漂', sub_category: '立漂', brand: '阿卢', model: '巴尔杉木 LPA-01 3#', cost_price: 800, suggest_price: 1800, location: 'C区-漂盒-B1', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '待盘点', created_at: daysAgo(12), updated_at: daysAgo(3) },
-  { id: 11, sku_code: 'JC-WL-CW-LQ-21', barcode: '6923456789111', category: '渔网', sub_category: '抄网', brand: '连球', model: '折叠抄网 2.1m', cost_price: 2500, suggest_price: 4800, location: 'B区-2号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '已盘点', created_at: daysAgo(10), updated_at: daysAgo(9) },
-  { id: 12, sku_code: 'JC-SP-YS-JDN-22', barcode: '6923456789128', category: '伞/遮阳', sub_category: '钓鱼伞', brand: '佳钓尼', model: '钓鱼伞 2.2m 万向', cost_price: 4500, suggest_price: 7900, location: 'D区-大件区', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, status: '已售罄', created_at: daysAgo(40), updated_at: daysAgo(10) },
+  { id: 1, sku_code: 'JC-FG-SG-GW-36', barcode: '6923456789012', category: '鱼竿', sub_category: '手竿', brand: '光威', model: '赤刃 3.6m 28调', cost_price: 4200, suggest_price: 8500, location: 'A区-东墙-第2层', photo_path: null, name_vi: null, rod_length: '3.6m', line_number: null, hook_size: null, color: null, material: '碳素', rod_action: '28调', power_rating: null, expiry_date: null, min_stock: null, status: '已盘点', created_at: daysAgo(30), updated_at: daysAgo(2) },
+  { id: 2, sku_code: 'JC-FG-SG-HS-45', barcode: '6923456789029', category: '鱼竿', sub_category: '手竿', brand: '化氏', model: '一味 4.5m 28调', cost_price: 6800, suggest_price: 12800, location: 'A区-东墙-第3层', photo_path: null, name_vi: null, rod_length: '4.5m', line_number: null, hook_size: null, color: null, material: '碳素', rod_action: '28调', power_rating: null, expiry_date: null, min_stock: null, status: '已盘点', created_at: daysAgo(28), updated_at: daysAgo(5) },
+  { id: 3, sku_code: 'JC-FG-LY-DYW-21', barcode: '6923456789036', category: '鱼竿', sub_category: '路亚竿', brand: '达亿瓦', model: '一击 2.1m ML调 枪柄', cost_price: 15500, suggest_price: 26800, location: 'A区-西墙-第1层', photo_path: null, name_vi: null, rod_length: '2.1m', line_number: null, hook_size: null, color: null, material: null, rod_action: 'ML调', power_rating: 'ML', expiry_date: null, min_stock: null, status: '已上架虾皮', created_at: daysAgo(25), updated_at: daysAgo(3) },
+  { id: 4, sku_code: 'JC-FG-HG-LW-30', barcode: '6923456789043', category: '鱼竿', sub_category: '海竿', brand: '狼王', model: '远投 3.0m', cost_price: 5500, suggest_price: 9900, location: 'B区-1号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '待盘点', created_at: daysAgo(22), updated_at: daysAgo(8) },
+  { id: 5, sku_code: 'JC-YL-FC-XMN-2500', barcode: '6923456789050', category: '渔轮', sub_category: '纺车轮', brand: '禧玛诺', model: '纳西 2500HG', cost_price: 32000, suggest_price: 49800, location: 'B区-3号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已上架虾皮', created_at: daysAgo(20), updated_at: daysAgo(1) },
+  { id: 6, sku_code: 'JC-YL-SD-AB-001', barcode: '6923456789067', category: '渔轮', sub_category: '水滴轮', brand: '阿布加西亚', model: 'BMAX3 右握', cost_price: 21000, suggest_price: 33800, location: 'B区-3号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '待盘点', created_at: daysAgo(18), updated_at: daysAgo(6) },
+  { id: 7, sku_code: 'JC-XL-PE-YGK-1.5', barcode: '6923456789074', category: '鱼线', sub_category: 'PE线', brand: 'YGK', model: 'PE线 1.5号 200m', cost_price: 1800, suggest_price: 3500, location: 'C区-线材架-第1层', photo_path: null, name_vi: null, rod_length: null, line_number: '1.5号', hook_size: null, color: '五彩', material: 'PE', rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已盘点', created_at: daysAgo(15), updated_at: daysAgo(2) },
+  { id: 8, sku_code: 'JC-JL-MN-MB-009', barcode: '6923456789081', category: '路亚假饵', sub_category: '米诺', brand: 'Megabass', model: '米诺 9cm 金鳞', cost_price: 1200, suggest_price: 2800, location: 'C区-饵盒-A3', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已上架虾皮', created_at: daysAgo(15), updated_at: daysAgo(4) },
+  { id: 9, sku_code: 'JC-YG-YS-TFF-05', barcode: '6923456789098', category: '鱼钩', sub_category: '伊势尼', brand: '土肥富', model: '伊势尼 5号 10枚装', cost_price: 300, suggest_price: 800, location: 'C区-钩架-第2层', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: '5号', color: null, material: '高碳钢', rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已盘点', created_at: daysAgo(14), updated_at: daysAgo(7) },
+  { id: 10, sku_code: 'JC-FP-LP-AL-001', barcode: '6923456789104', category: '浮漂', sub_category: '立漂', brand: '阿卢', model: '巴尔杉木 LPA-01 3#', cost_price: 800, suggest_price: 1800, location: 'C区-漂盒-B1', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '待盘点', created_at: daysAgo(12), updated_at: daysAgo(3) },
+  { id: 11, sku_code: 'JC-WL-CW-LQ-21', barcode: '6923456789111', category: '渔网', sub_category: '抄网', brand: '连球', model: '折叠抄网 2.1m', cost_price: 2500, suggest_price: 4800, location: 'B区-2号柜', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已盘点', created_at: daysAgo(10), updated_at: daysAgo(9) },
+  { id: 12, sku_code: 'JC-SP-YS-JDN-22', barcode: '6923456789128', category: '伞/遮阳', sub_category: '钓鱼伞', brand: '佳钓尼', model: '钓鱼伞 2.2m 万向', cost_price: 4500, suggest_price: 7900, location: 'D区-大件区', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: null, min_stock: null, status: '已售罄', created_at: daysAgo(40), updated_at: daysAgo(10) },
+  // 临期/过期 mock：饵料 12 天后过期（琥珀预警）、小药已过期 5 天（红色预警），都有库存
+  { id: 13, sku_code: 'JC-ER-SP-LG-918', barcode: '6923456789135', category: '饵料', sub_category: '商品饵', brand: '老鬼', model: '九一八 腥香 300g', cost_price: 900, suggest_price: 1800, location: 'C区-饵料架-第1层', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: dateInDays(12), min_stock: null, status: '已盘点', created_at: daysAgo(9), updated_at: daysAgo(1) },
+  { id: 14, sku_code: 'JC-XY-XY-XBF-60', barcode: '6923456789142', category: '小药', sub_category: null, brand: '西部风', model: '牛B鲫 60ml', cost_price: 600, suggest_price: 1500, location: 'C区-饵料架-第2层', photo_path: null, name_vi: null, rod_length: null, line_number: null, hook_size: null, color: null, material: null, rod_action: null, power_rating: null, expiry_date: dateInDays(-5), min_stock: null, status: '已盘点', created_at: daysAgo(60), updated_at: daysAgo(2) },
 ]
 
 // 总库存 = 各批次 quantity 之和；product 12 无批次即 0 库存（已售罄）
@@ -63,6 +71,8 @@ export const mockBatches: InventoryBatch[] = [
   { id: 14, product_id: 9, batch_no: 'PO20260721-006', quantity: 17, cost_price: 320, location: 'C区-钩架-第2层', inbound_date: dateDaysAgo(7), supplier_id: 2 },
   { id: 15, product_id: 10, batch_no: 'PO20260715-001', quantity: 30, cost_price: 800, location: 'C区-漂盒-B1', inbound_date: dateDaysAgo(13), supplier_id: 4 },
   { id: 16, product_id: 11, batch_no: 'PO20260717-002', quantity: 2, cost_price: 2500, location: 'B区-2号柜', inbound_date: dateDaysAgo(11), supplier_id: 1 },
+  { id: 17, product_id: 13, batch_no: 'PO20260723-001', quantity: 20, cost_price: 900, location: 'C区-饵料架-第1层', inbound_date: dateDaysAgo(5), supplier_id: 2 },
+  { id: 18, product_id: 14, batch_no: 'PO20260530-001', quantity: 8, cost_price: 600, location: 'C区-饵料架-第2层', inbound_date: dateDaysAgo(59), supplier_id: 2 },
 ]
 
 // 近 7 天出入库流水（含今天）+ 90 天前历史流水，供仪表盘趋势图与统计
@@ -225,4 +235,17 @@ export const mockPriceTiers: PriceTier[] = [
   { id: 3, product_id: 1, tier: 'wholesale', price: 7200 },
   { id: 4, product_id: 7, tier: 'retail', price: 3500 },
   { id: 5, product_id: 7, tier: 'promo', price: 2990 },
+]
+
+// ---------- 操作日志 mock（浏览器 dev 用；生产环境一律以后端 audit_log 表 / audit:list 为准） ----------
+// 时间倒序；mock 路径下入库/出库/还账还会由 appStore 顺手往这里追加新记录
+export const mockAuditLogs: AuditLogEntry[] = [
+  { id: 8, action: '出库', entity: '光威 赤刃 3.6m 28调 x2', detail: JSON.stringify({ quantity: 2, sellingPrice: 8500, totalDue: 17000, paidAmount: null, creditAmount: 0 }), operator: '阿杜', created_at: daysAgo(0, 15) },
+  { id: 7, action: '还账', entity: '老王 还 50.00 元', detail: JSON.stringify({ amount: 5000, method: '微信', before: 7000, outstanding: 2000 }), operator: '阿杜', created_at: daysAgo(2, 15) },
+  { id: 6, action: '入库', entity: '阿卢 巴尔杉木 LPA-01 3# x30', detail: JSON.stringify({ quantity: 30, costPrice: 800 }), operator: '阿杜', created_at: daysAgo(0, 11) },
+  { id: 5, action: '改价', entity: '禧玛诺 纳西 2500HG', detail: JSON.stringify({ tier: 'wholesale', price: 46000 }), operator: '阿杜', created_at: daysAgo(2, 16) },
+  { id: 4, action: '退货', entity: '佳钓尼 钓鱼伞 2.2m 万向 x1', detail: JSON.stringify({ quantity: 1, refundPrice: 7900 }), operator: '阿杜', created_at: daysAgo(3, 17) },
+  { id: 3, action: '新建商品', entity: '老鬼 九一八 腥香 300g', detail: JSON.stringify({ sku: 'JC-ER-SP-LG-918', cost_price: 900 }), operator: '阿杜', created_at: daysAgo(9, 9) },
+  { id: 2, action: '盘点', entity: 'ST20260720-001', detail: JSON.stringify({ counted: 3 }), operator: '阿杜', created_at: daysAgo(8, 17) },
+  { id: 1, action: '新建客户', entity: '老王', detail: JSON.stringify({ phone: '13812345678', price_level: 'regular' }), operator: null, created_at: daysAgo(20, 10) },
 ]
