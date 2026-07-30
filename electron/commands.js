@@ -381,11 +381,28 @@ export function createReturn(db, { productId, quantity, refundPrice, operator, c
  * 与退货/正常出库同类型，全站的今日记录、营业额、毛利、趋势统计自动涵盖换货，
  * 不需要每个报表单独识别 exchange 类型。
  * 新货库存不足时不落任何写入，返回 shortage。
+ *
+ * 差价扩展（customerId / diffPaidAmount 均可空）：
+ * - 差价 diff = 新腿售价合计 - 旧腿原售价合计；旧腿原售价取该商品最近一条带售价的出库流水，
+ *   找不到回退商品建议零售价，都没有按 0 并在返回 oldPriceSource='none' 标注。
+ * - diff > 0（客户补钱）：diffPaidAmount 省略=差价全额付清（新腿流水 paid_amount 保持 NULL）；
+ *   部分付/0=差价赊账（必须传 customerId，否则报"赊账必须选客户"，口径照 confirmOutbound）。
+ *   赊账时新腿流水记 customer_id + paid_amount（按 FIFO 分摊：旧货价值视为已付，
+ *   即 Σpaid = 新腿应付 - 赊欠差额），返回值带 {diff, diffPaid, diffCredit}。
+ * - diff < 0（退钱给客户）：记一条 type='exchange' 数量为正的流水，paid_amount 记负退款额、
+ *   notes 标注"换货退差价"；若原购买是赊账且未付清（旧腿原流水有 customer_id 且有未付部分），
+ *   优先冲减该客户欠款（exchange 流水记原 customer_id，欠款口径见 netCreditOf），
+ *   否则退现金（customer_id 记 NULL）；返回值 refundHandling 说明实际处理方式。
  */
-export function createExchange(db, { oldProductId, newProductId, quantity, sellingPrice, operator }) {
+export function createExchange(db, { oldProductId, newProductId, quantity, sellingPrice, operator, customerId, diffPaidAmount }) {
   assertPositiveInt(quantity, '换货数量')
   if (sellingPrice != null) assertFen(sellingPrice, '换货售价')
+  if (diffPaidAmount != null) assertFen(diffPaidAmount, '差价实收')
   return inTransaction(db, () => {
+    if (customerId != null) {
+      const cust = db.prepare('SELECT id FROM customers WHERE id = ?').get(customerId)
+      if (!cust) throw new Error('客户不存在')
+    }
     // 先验新货库存，不够直接拒绝（尚未写入，事务提交等于空操作）
     const newBatches = db
       .prepare(
@@ -397,6 +414,50 @@ export function createExchange(db, { oldProductId, newProductId, quantity, selli
     const total = newBatches.reduce((s, b) => s + b.quantity, 0)
     if (total < quantity) return { ok: false, shortage: quantity - total }
 
+    // 旧腿原售价：最近一条带售价的出库流水 → 建议零售价 → 0（标注来源）
+    const oldTx = db
+      .prepare(
+        `SELECT selling_price, customer_id, paid_amount, quantity FROM transactions
+         WHERE product_id = ? AND type = 'out' AND selling_price IS NOT NULL
+         ORDER BY timestamp DESC, id DESC LIMIT 1`,
+      )
+      .get(oldProductId)
+    let oldUnitPrice
+    let oldPriceSource
+    if (oldTx) {
+      oldUnitPrice = oldTx.selling_price
+      oldPriceSource = 'transaction'
+    } else {
+      const prod = db.prepare('SELECT suggest_price FROM products WHERE id = ?').get(oldProductId)
+      if (prod?.suggest_price != null) {
+        oldUnitPrice = prod.suggest_price
+        oldPriceSource = 'suggest'
+      } else {
+        oldUnitPrice = 0
+        oldPriceSource = 'none'
+      }
+    }
+    const oldTotal = oldUnitPrice * quantity
+    const newTotal = sellingPrice != null ? sellingPrice * quantity : null
+    const diff = newTotal != null ? newTotal - oldTotal : null
+
+    // 差价实收校验（口径照 confirmOutbound：省略=全额付清；部分付/0=赊账，必须选客户）
+    let diffPaid = null
+    if (diffPaidAmount != null) {
+      if (diff == null) throw new Error('记差价实收时必须填写新货售价')
+      if (diff <= 0) {
+        if (diffPaidAmount > 0) throw new Error('新货价格不高于旧货，无差价可收（应退差价）')
+      } else {
+        if (diffPaidAmount > diff) {
+          throw new Error(`差价实收不能超过差价（差价 ${diff} 分，实收 ${diffPaidAmount} 分）`)
+        }
+        if (diffPaidAmount < diff && customerId == null) throw new Error('赊账必须选客户')
+        diffPaid = diffPaidAmount
+      }
+    }
+    // 本次换货的差价赊欠额（>0 才走赊账分摊）
+    const diffCredit = diff != null && diff > 0 && diffPaid != null && diffPaid < diff ? diff - diffPaid : 0
+
     const ts = now()
     // 退旧：回补最近批次，按退货类型记账
     const back = addBackToLatestBatch(db, oldProductId, quantity)
@@ -406,18 +467,52 @@ export function createExchange(db, { oldProductId, newProductId, quantity, selli
     ).run(oldProductId, back.batchId, quantity, back.unitCost, ts, operator ?? null)
 
     // 出新：FIFO 扣减，按正常出库类型记账（营业额/毛利统计自动涵盖）
+    // 差价赊账时：旧货价值视为已付，实收分摊基数 = 新腿应付 - 赊欠差额，按 FIFO 顺序分摊
+    let paidLeft = diffCredit > 0 ? newTotal - diffCredit : 0
     let remaining = quantity
     for (const b of newBatches) {
       if (remaining <= 0) break
       const deduct = Math.min(b.quantity, remaining)
       db.prepare('UPDATE inventory_batches SET quantity = ? WHERE id = ?').run(b.quantity - deduct, b.id)
+      let paid = null
+      if (diffCredit > 0) {
+        paid = Math.min(deduct * sellingPrice, paidLeft)
+        paidLeft -= paid
+      }
       db.prepare(
-        `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes)
-         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, '换货出新')`,
-      ).run(newProductId, b.id, deduct, b.cost_price, sellingPrice ?? null, ts, operator ?? null)
+        `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount)
+         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, '换货出新', ?, ?)`,
+      ).run(newProductId, b.id, deduct, b.cost_price, sellingPrice ?? null, ts, operator ?? null, customerId ?? null, paid)
       remaining -= deduct
     }
-    return { ok: true }
+
+    const result = {
+      ok: true,
+      diff,
+      diffPaid: diff == null ? null : diff > 0 ? (diffPaid ?? diff) : 0,
+      diffCredit,
+      oldUnitPrice,
+      oldPriceSource,
+    }
+
+    // 退差价：退款 = -diff；原购买赊账未付清 → 冲减欠款，否则退现金
+    if (diff != null && diff < 0) {
+      const refund = -diff
+      const oldUnpaid =
+        oldTx && oldTx.customer_id != null
+          ? oldTx.quantity * oldTx.selling_price -
+            (oldTx.paid_amount ?? oldTx.quantity * oldTx.selling_price)
+          : 0
+      const offset = oldUnpaid > 0
+      db.prepare(
+        `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount)
+         VALUES (?, NULL, 'exchange', ?, NULL, NULL, ?, ?, '换货退差价', ?, ?)`,
+      ).run(oldProductId, quantity, ts, operator ?? null, offset ? oldTx.customer_id : null, -refund)
+      result.refund = refund
+      result.refundHandling = offset ? 'credit_offset' : 'cash'
+      if (offset) result.refundCustomerId = oldTx.customer_id
+    }
+    return result
   })
 }
 
@@ -449,14 +544,17 @@ export function deleteSupplier(db, id) {
 // 欠款口径（全站统一，listCustomers / recordPayment / customerStatement 共用）：
 //   赊销净额 = Σ out 流水(quantity*selling_price - COALESCE(paid_amount, quantity*selling_price))
 //              - Σ return 流水(quantity*selling_price)
+//              + Σ exchange 流水(paid_amount)
 //   · out 流水 paid_amount 为 NULL = 全额付清，贡献 0（赊账前的老数据、散客单都是 NULL，天然不纳入）
 //   · selling_price 为 NULL 的老流水不纳入（没有售价就谈不上赊销）
 //   · return 流水只要带了 customer_id 且记了退款金额，就按负数冲减（见 createReturn 注释）
+//   · exchange 流水=换货退差价（见 createExchange）：paid_amount 为负退款额，记了 customer_id
+//     的就是冲减欠款（负贡献），退现金的记 customer_id=NULL 天然不纳入
 //   当前欠款 outstanding = 赊销净额 - 还款累计；允许为负，负值即预收（老板多收/先收的钱）
 
 const PAYMENT_METHODS = ['现金', '微信', '支付宝', '其他']
 
-/** 单个客户的赊销净额（分）：out 未付部分 - return 冲减 */
+/** 单个客户的赊销净额（分）：out 未付部分 - return 冲减 + exchange 退差价冲减 */
 function netCreditOf(db, customerId) {
   const row = db
     .prepare(
@@ -465,6 +563,8 @@ function netCreditOf(db, customerId) {
            THEN quantity * selling_price - COALESCE(paid_amount, quantity * selling_price)
          WHEN type = 'return' AND selling_price IS NOT NULL
            THEN -quantity * selling_price
+         WHEN type = 'exchange' AND paid_amount IS NOT NULL
+           THEN paid_amount
          ELSE 0 END), 0) AS net
        FROM transactions WHERE customer_id = ?`,
     )
@@ -480,22 +580,24 @@ function outstandingOf(db, customerId) {
   return netCreditOf(db, customerId) - paid
 }
 
-/** 新建客户：姓名去空白后非空；同名客户拒绝建档（老板容易重复建） */
-export function createCustomer(db, { name, phone, notes }) {
+/** 新建客户：姓名去空白后非空；同名客户拒绝建档（老板容易重复建）；price_level 可空（NULL=零售默认） */
+export function createCustomer(db, { name, phone, notes, price_level }) {
   const n = name?.trim()
   if (!n) throw new Error('客户姓名不能为空')
+  assertPriceLevel(price_level)
   return inTransaction(db, () => {
     const dup = db.prepare('SELECT id FROM customers WHERE name = ?').get(n)
     if (dup) throw new Error(`已存在同名客户「${n}」，请勿重复建档`)
     const info = db
-      .prepare('INSERT INTO customers (name, phone, notes, created_at) VALUES (?, ?, ?, ?)')
-      .run(n, phone?.trim() || null, notes?.trim() || null, now())
+      .prepare('INSERT INTO customers (name, phone, notes, price_level, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(n, phone?.trim() || null, notes?.trim() || null, price_level ?? null, now())
     return db.prepare('SELECT * FROM customers WHERE id = ?').get(info.lastInsertRowid)
   })
 }
 
-/** 修改客户资料：只传要改的字段；改名时同样做同名查重（排除自己） */
-export function updateCustomer(db, { id, name, phone, notes }) {
+/** 修改客户资料：只传要改的字段；改名时同样做同名查重（排除自己）；price_level 传 null 清除（回零售默认） */
+export function updateCustomer(db, { id, name, phone, notes, price_level }) {
+  assertPriceLevel(price_level)
   return inTransaction(db, () => {
     const cur = db.prepare('SELECT * FROM customers WHERE id = ?').get(id)
     if (!cur) throw new Error('客户不存在')
@@ -505,10 +607,11 @@ export function updateCustomer(db, { id, name, phone, notes }) {
       const dup = db.prepare('SELECT id FROM customers WHERE name = ? AND id != ?').get(n, id)
       if (dup) throw new Error(`已存在同名客户「${n}」`)
     }
-    db.prepare('UPDATE customers SET name = ?, phone = ?, notes = ? WHERE id = ?').run(
+    db.prepare('UPDATE customers SET name = ?, phone = ?, notes = ?, price_level = ? WHERE id = ?').run(
       n,
       phone !== undefined ? phone?.trim() || null : cur.phone,
       notes !== undefined ? notes?.trim() || null : cur.notes,
+      price_level !== undefined ? price_level ?? null : cur.price_level,
       id,
     )
     return db.prepare('SELECT * FROM customers WHERE id = ?').get(id)
@@ -543,6 +646,8 @@ export function listCustomers(db) {
              THEN quantity * selling_price - COALESCE(paid_amount, quantity * selling_price)
            WHEN type = 'return' AND selling_price IS NOT NULL
              THEN -quantity * selling_price
+           WHEN type = 'exchange' AND paid_amount IS NOT NULL
+             THEN paid_amount
            ELSE 0 END) AS net_credit,
          MAX(timestamp) AS last_tx_at
        FROM transactions WHERE customer_id IS NOT NULL GROUP BY customer_id`,
@@ -932,6 +1037,13 @@ export function cancelPurchaseOrder(db, { id }) {
 // 同商品同 tier 覆盖更新（UPSERT）。标准零售价仍走 products.suggest_price，price_tiers 只存额外档次。
 
 const PRICE_TIERS = ['retail', 'regular', 'VIP', 'wholesale', 'promo']
+
+/** 客户价格档校验：NULL=零售默认，否则必须是五档之一 */
+function assertPriceLevel(v) {
+  if (v != null && !PRICE_TIERS.includes(v)) {
+    throw new Error(`价格档次必须是：${PRICE_TIERS.join(' / ')}，收到：${v}`)
+  }
+}
 
 export function setPriceTier(db, { productId, tier, price }) {
   if (!PRICE_TIERS.includes(tier)) throw new Error(`价格档次必须是：${PRICE_TIERS.join(' / ')}，收到：${tier}`)

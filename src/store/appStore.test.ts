@@ -1,8 +1,8 @@
 // appStore 浏览器 mock 回退路径的单测（无 Electron 后端时的本地逻辑）
 // 每个用例用独立 fixture 注入 store，不依赖 mock-data 的具体数值
 import { beforeEach, describe, expect, it } from 'vitest'
-import { useAppStore } from './appStore'
-import type { Customer, InventoryBatch, Product, StockTake, StockTakeItem } from '@/types'
+import { useAppStore, priceForCustomer } from './appStore'
+import type { Customer, InventoryBatch, PriceTier, Product, StockTake, StockTakeItem } from '@/types'
 
 const baseProduct: Product = {
   id: 1,
@@ -247,6 +247,7 @@ const baseCustomer: Customer = {
   name: '老王',
   phone: '13800000000',
   notes: null,
+  price_level: null,
   created_at: '2026-07-01T00:00:00.000Z',
 }
 
@@ -456,5 +457,175 @@ describe('价格档次（mock 路径）', () => {
     expect(
       s.priceTiers.some((t) => t.product_id === 1 && t.tier === 'wholesale'),
     ).toBe(false)
+  })
+})
+
+// ---------- 价格档自动化 + 换货差价（mock 回退路径） ----------
+
+describe('priceForCustomer（客户价格档自动定价）', () => {
+  const tiers: PriceTier[] = [
+    { id: 1, product_id: 1, tier: 'retail', price: 8500 },
+    { id: 2, product_id: 1, tier: 'wholesale', price: 7200 },
+  ]
+
+  it('客户设了档且商品设了这档价 → 用档次价', () => {
+    expect(priceForCustomer(baseProduct, tiers, { price_level: 'wholesale' })).toEqual({
+      price: 7200,
+      tier: 'wholesale',
+    })
+  })
+
+  it('商品没设客户这档 → 回退建议价，不报错', () => {
+    expect(priceForCustomer(baseProduct, tiers, { price_level: 'VIP' })).toEqual({
+      price: 8500, // baseProduct.suggest_price
+      tier: null,
+    })
+  })
+
+  it('散客/没设档的客户按零售档；零售也没设回退建议价', () => {
+    expect(priceForCustomer(baseProduct, tiers, null)).toEqual({ price: 8500, tier: 'retail' })
+    expect(priceForCustomer(baseProduct, tiers, { price_level: null })).toEqual({
+      price: 8500,
+      tier: 'retail',
+    })
+    expect(priceForCustomer(baseProduct, [], null)).toEqual({ price: 8500, tier: null })
+  })
+})
+
+describe('客户默认价格档（mock 路径）', () => {
+  it('建档/改档/清档都能存住 price_level', async () => {
+    const c = await useAppStore.getState().addCustomer({
+      name: '码头张老板', phone: null, notes: null, price_level: 'wholesale',
+    })
+    expect(c.price_level).toBe('wholesale')
+    expect(useAppStore.getState().customers.find((x) => x.id === c.id)!.price_level).toBe(
+      'wholesale',
+    )
+    await useAppStore.getState().updateCustomer(c.id, {
+      name: '码头张老板', phone: null, notes: null, price_level: 'VIP',
+    })
+    expect(useAppStore.getState().customers.find((x) => x.id === c.id)!.price_level).toBe('VIP')
+    // 传 null 清除，回零售默认
+    await useAppStore.getState().updateCustomer(c.id, {
+      name: '码头张老板', phone: null, notes: null, price_level: null,
+    })
+    expect(useAppStore.getState().customers.find((x) => x.id === c.id)!.price_level).toBeNull()
+  })
+})
+
+describe('confirmOutbound 价格档（mock 路径）', () => {
+  it('没传显式售价但传了档 → 按档定价；没设这档回退建议价；显式售价优先', async () => {
+    seed({ priceTiers: [{ id: 1, product_id: 1, tier: 'wholesale', price: 7200 }] })
+    await useAppStore.getState().confirmOutbound(1, 1, null, '测试员', { tier: 'wholesale' })
+    expect(useAppStore.getState().transactions[0].selling_price).toBe(7200)
+
+    await useAppStore.getState().confirmOutbound(1, 1, null, '测试员', { tier: 'VIP' })
+    expect(useAppStore.getState().transactions[0].selling_price).toBe(8500) // 回退建议价
+
+    await useAppStore.getState().confirmOutbound(1, 1, 9000, '测试员', { tier: 'wholesale' })
+    expect(useAppStore.getState().transactions[0].selling_price).toBe(9000) // 显式售价优先
+  })
+})
+
+describe('换货差价（mock 路径）', () => {
+  // 新货：product 2，一批 5 件 @60元成本，建议价 120
+  const product2: Product = {
+    ...baseProduct,
+    id: 2,
+    sku_code: 'JC-FG-SG-GW-002',
+    barcode: null,
+    model: '测试竿 4.5m',
+    cost_price: 6000,
+    suggest_price: 12000,
+  }
+  const batch2: InventoryBatch = {
+    id: 10, product_id: 2, batch_no: 'PO20260701-002', quantity: 5,
+    cost_price: 6000, location: null, inbound_date: '2026-07-01', supplier_id: null,
+  }
+  const custSeed = {
+    customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }],
+  }
+  const seedTwo = () => seed({ products: [structuredClone(baseProduct), product2], batches: [...structuredClone(baseBatches), batch2], ...custSeed })
+
+  it('旧货没找到售价记录 → 按建议价算差价（oldPriceSource=suggest）', async () => {
+    seedTwo()
+    const r = await useAppStore.getState().addExchange(1, 2, 1, 10000, '测试员')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.oldPriceSource).toBe('suggest')
+    expect(r.oldUnitPrice).toBe(8500)
+    expect(r.diff).toBe(1500) // 10000 - 8500
+    expect(r.diffPaid).toBe(1500) // 省略实收=差价全额付清
+    expect(r.diffCredit).toBe(0)
+  })
+
+  it('新货贵要补钱：补的钱先欠着 → 欠款只记差价部分（旧货价值视为已付）', async () => {
+    seedTwo()
+    // 旧货先按 80 元全款卖过一条 → 旧腿原售价 8000
+    await useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员')
+    // 换 100 元的新货：差价 2000，只补 500，剩 1500 记老王账上
+    const r = await useAppStore.getState().addExchange(1, 2, 1, 10000, '测试员', {
+      customerId: 1,
+      diffPaidAmount: 500,
+    })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.oldPriceSource).toBe('transaction')
+    expect(r.diff).toBe(2000)
+    expect(r.diffPaid).toBe(500)
+    expect(r.diffCredit).toBe(1500)
+    const s = useAppStore.getState()
+    // 新腿流水：实收 = 新腿应付 - 赊欠差额 = 10000 - 1500 = 8500
+    const outTx = s.transactions.find((t) => t.notes === '换货出新')!
+    expect(outTx.customer_id).toBe(1)
+    expect(outTx.paid_amount).toBe(8500)
+    // 老王欠款只多了差价赊欠的 1500
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(1500)
+  })
+
+  it('补的钱要赊账但没选客户 → 拒绝', async () => {
+    seedTwo()
+    await useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员')
+    await expect(
+      useAppStore.getState().addExchange(1, 2, 1, 10000, '测试员', { diffPaidAmount: 500 }),
+    ).rejects.toThrow('赊账必须选客户')
+    // 实收超过差价 → 拒绝
+    await expect(
+      useAppStore.getState().addExchange(1, 2, 1, 10000, '测试员', { customerId: 1, diffPaidAmount: 9999 }),
+    ).rejects.toThrow('差价实收不能超过差价')
+  })
+
+  it('新货便宜要退钱：原单赊账未付清 → 差价从他欠款里扣', async () => {
+    seedTwo()
+    // 老王纯赊 80 元买走一条旧货
+    await useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员', { customerId: 1, paidAmount: 0 })
+    expect(useAppStore.getState().customers.find((c) => c.id === 1)!.outstanding).toBe(8000)
+    // 换 50 元的新货：差价 -3000，冲减欠款
+    const r = await useAppStore.getState().addExchange(1, 2, 1, 5000, '测试员', { customerId: 1 })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.diff).toBe(-3000)
+    expect(r.refund).toBe(3000)
+    expect(r.refundHandling).toBe('credit_offset')
+    expect(r.refundCustomerId).toBe(1)
+    const s = useAppStore.getState()
+    const diffTx = s.transactions.find((t) => t.type === 'exchange')!
+    expect(diffTx.customer_id).toBe(1)
+    expect(diffTx.paid_amount).toBe(-3000)
+    // 欠款 8000 - 3000 = 5000
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(5000)
+  })
+
+  it('新货便宜要退钱：原单已全款 → 退现金（不冲欠款）', async () => {
+    seedTwo()
+    await useAppStore.getState().confirmOutbound(1, 1, 8000, '测试员') // 散客全款
+    const r = await useAppStore.getState().addExchange(1, 2, 1, 5000, '测试员')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.diff).toBe(-3000)
+    expect(r.refundHandling).toBe('cash')
+    const diffTx = useAppStore.getState().transactions.find((t) => t.type === 'exchange')!
+    expect(diffTx.customer_id).toBeNull()
+    expect(diffTx.paid_amount).toBe(-3000)
   })
 })

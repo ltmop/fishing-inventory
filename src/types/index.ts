@@ -128,6 +128,8 @@ export interface Customer {
   name: string
   phone: string | null
   notes: string | null
+  /** 默认价格档：NULL=零售默认；设了之后出库选他会自动按这档出价 */
+  price_level: PriceLevel | null
   created_at: string
 }
 

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'motion/react'
-import { ArrowLeftRight, Loader2, PackageMinus, RotateCcw } from 'lucide-react'
+import { ArrowLeftRight, Loader2, PackageMinus, Printer, RotateCcw } from 'lucide-react'
 import { PageHeader, SuccessBanner, ErrorBanner } from '@/components/feedback'
+import { ReceiptDialog, makeReceiptNo, type ReceiptData } from '@/components/Receipt'
 import { ScanHero } from '@/components/scan/ScanHero'
-import { useAppStore } from '@/store/appStore'
+import { useAppStore, priceForCustomer } from '@/store/appStore'
 import { previewFifo } from '@/lib/fifo'
 import { playSound } from '@/lib/sounds'
 import { formatDate, formatPrice, formatTime, isToday, productName } from '@/lib/formatters'
@@ -77,6 +78,9 @@ export function OutboundPage() {
   const [success, setSuccess] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [executing, setExecuting] = useState(false)
+  // 上一单小票：出库成功后留档，成功横幅消失后仍可补打
+  const [receipt, setReceipt] = useState<ReceiptData | null>(null)
+  const [receiptOpen, setReceiptOpen] = useState(false)
 
   // 赊账包：确认出库时选客户 + 付款方式（散客只能全额收款）
   const WALK_IN = '__walkin__'
@@ -111,6 +115,10 @@ export function OutboundPage() {
   const [exchQty, setExchQty] = useState('')
   const [exchPrice, setExchPrice] = useState('')
   const [exchBusy, setExchBusy] = useState(false)
+  // 换货差价：谁换的货（散客=当场结清）；补的钱可以选「先欠着」记客户账上
+  const [exchCustKey, setExchCustKey] = useState(WALK_IN)
+  const [exchDiffPaid, setExchDiffPaid] = useState('')
+  const [exchDiffOnCredit, setExchDiffOnCredit] = useState(false)
 
   useEffect(() => {
     if (!success) return
@@ -176,6 +184,17 @@ export function OutboundPage() {
     setActiveTier(tier)
   }
 
+  // 价格档自动化：确认框里选了客户就按他的默认档出价（设了档必须自动生效，伙计不该手动输价）；
+  // 商品没设这档 → 回退建议价，不报错；散客/没设档的客户按零售价
+  const applyCustomerPrice = (cust: Customer | null) => {
+    if (!selected) return
+    const { price, tier } = priceForCustomer(selected, priceTiers, cust)
+    setPriceYuan(price != null ? (price / 100).toFixed(2) : '')
+    setActiveTier(tier)
+    // 「付一部分」的默认实收跟着新价走
+    if (qtyValid && price != null) setPaidYuan(((qty * price) / 100).toFixed(2))
+  }
+
   const resetSelection = () => {
     setSelected(null)
     setQuantity('')
@@ -224,6 +243,7 @@ export function OutboundPage() {
       const c: Customer = await addCustomer({ name: quickName, phone: quickPhone, notes: '' })
       setQuickCustOpen(false)
       setCustKey(String(c.id))
+      applyCustomerPrice(c)
       playSound('success')
     } catch (e) {
       playSound('error')
@@ -263,6 +283,8 @@ export function OutboundPage() {
         credit = { customerId: custId }
       }
     }
+    // 带上当前选中的价格档：显式售价优先，档仅作兜底/留痕（与后端 tier 口径一致）
+    if (credit && activeTier) credit.tier = activeTier
     setExecuting(true)
     try {
       const result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', credit)
@@ -275,6 +297,15 @@ export function OutboundPage() {
       playSound('success')
       const custName = custId !== null ? (customers.find((c) => c.id === custId)?.name ?? null) : null
       const owed = credit?.paidAmount != null ? total - credit.paidAmount : 0
+      // 留档小票数据：实收 null=全额收款（散客/客户全额）；赊账=只付了一部分或全欠
+      setReceipt({
+        receiptNo: makeReceiptNo(),
+        time: new Date().toISOString(),
+        operator: operator.trim() || '未署名',
+        items: [{ name: productName(selected), quantity: qty, unitPrice: price }],
+        paid: credit?.paidAmount ?? null,
+        customerName: custName,
+      })
       if (custName && owed > 0) {
         setSuccess(`已记账：${custName} 欠 ${formatPrice(owed)}（${productName(selected)} × ${qty}）`)
       } else if (custName) {
@@ -295,16 +326,17 @@ export function OutboundPage() {
     }
   }
 
-  // 今日流水：出库 + 退货 + 换货（换货双腿已按 return/out 记账，天然包含）
+  // 今日流水：出库 + 退货 + 换货（换货双腿已按 return/out 记账，退差价按 exchange 记账，天然包含）
   const todayRecords = transactions.filter(
-    (t) => (t.type === 'out' || t.type === 'return') && isToday(t.timestamp),
+    (t) => (t.type === 'out' || t.type === 'return' || t.type === 'exchange') && isToday(t.timestamp),
   )
 
-  // 流水类型标签：优先用 notes 识别换货双腿
+  // 流水类型标签：优先用 notes 识别换货双腿/退差价
   const txKindLabel = (t: (typeof todayRecords)[number]): string => {
     if (t.notes === '换货出新') return '换货出新'
     if (t.notes === '换货退旧') return '换货退旧'
-    return t.type === 'return' ? '退货' : '出库'
+    if (t.notes === '换货退差价') return '退差价'
+    return t.type === 'return' ? '退货' : t.type === 'exchange' ? '退差价' : '出库'
   }
 
   // 退货候选：与出库搜索同规则
@@ -400,9 +432,75 @@ export function OutboundPage() {
     setExchNewKw('')
     setExchQty('')
     setExchPrice('')
+    setExchCustKey(WALK_IN)
+    setExchDiffPaid('')
+    setExchDiffOnCredit(false)
     setError('')
     setExchOpen(true)
   }
+
+  // 换货客户（散客=当场结清，不能赊差价）
+  const exchCustomer =
+    exchCustKey === WALK_IN ? null : (customers.find((c) => String(c.id) === exchCustKey) ?? null)
+
+  // 选新货时自动出价：换货客户有默认档按他的档，否则零售档，都没设回退建议价
+  const selectExchNew = (p: Product | null) => {
+    setExchNew(p)
+    if (p) {
+      const { price } = priceForCustomer(p, priceTiers, exchCustomer)
+      setExchPrice(price != null ? (price / 100).toFixed(2) : '')
+    }
+  }
+
+  // 切换换货客户：新货价格联动刷新
+  const selectExchCustomer = (v: string) => {
+    setExchCustKey(v)
+    const cust = v === WALK_IN ? null : (customers.find((c) => String(c.id) === v) ?? null)
+    if (exchNew) {
+      const { price } = priceForCustomer(exchNew, priceTiers, cust)
+      setExchPrice(price != null ? (price / 100).toFixed(2) : '')
+    }
+  }
+
+  // 旧腿原售价（与后端 createExchange 同口径）：最近一条带售价的出库流水 → 建议零售价 → 0
+  const exchOldPrice = useMemo(() => {
+    if (!exchOld) return null
+    const tx = transactions.find(
+      (t) => t.product_id === exchOld.id && t.type === 'out' && t.selling_price != null,
+    )
+    if (tx) return { unitPrice: tx.selling_price!, source: 'transaction' as const, tx }
+    if (exchOld.suggest_price != null) {
+      return { unitPrice: exchOld.suggest_price, source: 'suggest' as const, tx: null }
+    }
+    return { unitPrice: 0, source: 'none' as const, tx: null }
+  }, [exchOld, transactions])
+
+  // 差价试算：新腿售价合计 - 旧腿原售价合计（与后端一致）
+  const exchQtyN = Number(exchQty)
+  const exchQtyValid = Number.isInteger(exchQtyN) && exchQtyN > 0
+  const exchNewPriceCents = yuanToCents(exchPrice)
+  const exchDiff =
+    exchOld && exchNew && exchQtyValid && exchNewPriceCents != null && exchOldPrice
+      ? exchQtyN * exchNewPriceCents - exchQtyN * exchOldPrice.unitPrice
+      : null
+
+  // 要补钱时实收默认全补（改了数量/价格自动跟着变，手动改过也会被刷新，避免对不上账）
+  useEffect(() => {
+    if (exchDiff != null && exchDiff > 0 && !exchDiffOnCredit) {
+      setExchDiffPaid((exchDiff / 100).toFixed(2))
+    }
+  }, [exchDiff, exchDiffOnCredit])
+
+  // 要退钱时的处理方式预览（与后端 refundHandling 同口径）：原单赊账未付清 → 冲减欠款，否则退现金
+  const exchRefundOffsetCust = useMemo(() => {
+    if (exchDiff == null || exchDiff >= 0 || !exchOldPrice?.tx) return null
+    const t = exchOldPrice.tx
+    if (t.customer_id == null) return null
+    const unpaid =
+      t.quantity * t.selling_price! - (t.paid_amount ?? t.quantity * t.selling_price!)
+    if (unpaid <= 0) return null
+    return customers.find((c) => c.id === t.customer_id) ?? null
+  }, [exchDiff, exchOldPrice, customers])
 
   const handleExchangeSubmit = async () => {
     if (!exchOld || !exchNew || exchBusy) return
@@ -420,9 +518,31 @@ export function OutboundPage() {
       setError('请填写新货售价（必须大于 0 元）')
       return
     }
+    // 差价实收：省略=全额付清；部分付/先欠着=差价赊账，必须选客户（与后端口径一致）
+    const custId = exchCustomer?.id ?? null
+    let diffPaidAmount: number | null = null
+    if (exchDiff != null && exchDiff > 0) {
+      const paid = exchDiffOnCredit ? 0 : yuanToCents(exchDiffPaid)
+      if (paid === null) {
+        setError('请填写补的钱实收多少（元）')
+        return
+      }
+      if (paid > exchDiff) {
+        setError(`补的钱不能超过差价 ${formatPrice(exchDiff)}`)
+        return
+      }
+      if (paid < exchDiff && custId === null) {
+        setError('补的钱要赊账，必须先在上面选一个客户')
+        return
+      }
+      diffPaidAmount = paid >= exchDiff ? null : paid
+    }
     setExchBusy(true)
     try {
-      const r = await addExchange(exchOld.id, exchNew.id, q, price, operator.trim() || '未署名')
+      const r = await addExchange(exchOld.id, exchNew.id, q, price, operator.trim() || '未署名', {
+        customerId: custId,
+        diffPaidAmount,
+      })
       if (!r.ok) {
         playSound('error')
         setError(`新货「${productName(exchNew)}」库存不足，还差 ${r.shortage} 件，换货未记账`)
@@ -430,7 +550,25 @@ export function OutboundPage() {
       }
       setExchOpen(false)
       playSound('success')
-      setSuccess(`换货完成：退回 ${productName(exchOld)} × ${q}，出新 ${productName(exchNew)} × ${q}`)
+      const custName =
+        exchCustomer?.name ??
+        (r.refundCustomerId != null
+          ? (customers.find((c) => c.id === r.refundCustomerId)?.name ?? null)
+          : null)
+      // 成功提示带差价结果：补钱/退钱一眼看清
+      let msg = `换货完成：退回 ${productName(exchOld)} × ${q}，出新 ${productName(exchNew)} × ${q}`
+      if (r.diff != null && r.diff > 0) {
+        msg =
+          r.diffCredit > 0
+            ? `换货完成，${custName ?? '顾客'} 补了 ${formatPrice(r.diffPaid ?? 0)}，剩下 ${formatPrice(r.diffCredit)} 记他账上`
+            : `换货完成，${custName ?? '顾客'} 还补了 ${formatPrice(r.diff)}`
+      } else if (r.diff != null && r.diff < 0) {
+        msg =
+          r.refundHandling === 'credit_offset'
+            ? `换货完成，差价 ${formatPrice(r.refund ?? -r.diff)} 已从他欠款里扣掉`
+            : `换货完成，差价 ${formatPrice(r.refund ?? -r.diff)} 已退现金给${custName ?? '顾客'}`
+      }
+      setSuccess(msg)
     } catch (e) {
       playSound('error')
       setError(`换货失败：${e instanceof Error ? e.message : String(e)}`)
@@ -558,6 +696,20 @@ export function OutboundPage() {
       {success && <SuccessBanner>{success}</SuccessBanner>}
       {error && <ErrorBanner>{error}</ErrorBanner>}
 
+      {/* 上一单小票：成功横幅 3 秒消失后，这里还能补打 */}
+      {receipt && (
+        <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2.5 text-sm">
+          <span>上一单已出库，需要的话打张小票给顾客</span>
+          <Button size="sm" variant="outline" onClick={() => setReceiptOpen(true)}>
+            <Printer className="size-4" />
+            打印小票
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setReceipt(null)}>
+            不用了
+          </Button>
+        </div>
+      )}
+
       {/* 选中商品：与入库匹配卡片同款升舱处理 */}
       {selected && (
         <Card className="gap-0 overflow-hidden py-0">
@@ -625,6 +777,11 @@ export function OutboundPage() {
               <div className="space-y-1">
                 <Label>
                   售价（元）<span className="text-red-500">*</span>
+                  {activeTier && (
+                    <Badge className="ml-2 bg-brand-100 text-brand-700">
+                      {PRICE_LEVEL_LABELS[activeTier]}价
+                    </Badge>
+                  )}
                 </Label>
                 <Input
                   type="number"
@@ -692,6 +849,7 @@ export function OutboundPage() {
                   const p = products.find((x) => x.id === t.product_id)
                   const b = batches.find((x) => x.id === t.batch_id)
                   const isReturn = t.type === 'return'
+                  const isExchangeDiff = t.type === 'exchange' // 换货退差价：不动库存，paid_amount 为负退款额
                   // 退货按负毛利冲减：退款 − 批次成本，取负
                   const profit =
                     t.selling_price != null && t.unit_price != null
@@ -703,7 +861,7 @@ export function OutboundPage() {
                       <TableCell>{formatTime(t.timestamp)}</TableCell>
                       <TableCell>
                         <Badge
-                          variant={isReturn ? 'destructive' : 'secondary'}
+                          variant={isReturn || isExchangeDiff ? 'destructive' : 'secondary'}
                           className={cn(kind.startsWith('换货') && !isReturn && 'bg-brand-100 text-brand-700')}
                         >
                           {kind}
@@ -736,11 +894,11 @@ export function OutboundPage() {
                       </TableCell>
                       <TableCell className="font-mono text-xs">{b?.batch_no ?? '-'}</TableCell>
                       <TableCell className={cn('text-right', isReturn && 'text-red-600')}>
-                        {isReturn ? `-${t.quantity}` : t.quantity}
+                        {isExchangeDiff ? '-' : isReturn ? `-${t.quantity}` : t.quantity}
                       </TableCell>
                       <TableCell className="text-right">{formatPrice(t.unit_price)}</TableCell>
-                      <TableCell className={cn('text-right', isReturn && 'text-red-600')}>
-                        {formatPrice(t.selling_price)}
+                      <TableCell className={cn('text-right', (isReturn || isExchangeDiff) && 'text-red-600')}>
+                        {isExchangeDiff ? formatPrice(t.paid_amount) : formatPrice(t.selling_price)}
                       </TableCell>
                       <TableCell
                         className={cn(
@@ -813,7 +971,8 @@ export function OutboundPage() {
               </div>
               <div className="text-xs text-muted-foreground">
                 当前售价 {formatPrice(yuanToCents(priceYuan))}
-                {activeTier === null && yuanToCents(priceYuan) !== null && '（自定义价）'}
+                {yuanToCents(priceYuan) !== null &&
+                  (activeTier !== null ? `（${PRICE_LEVEL_LABELS[activeTier]}价）` : '（自定义价）')}
               </div>
             </div>
           )}
@@ -834,6 +993,10 @@ export function OutboundPage() {
                     setCustKey(v)
                     setPayMode('full')
                     setConfirmError('')
+                    // 切客户价格联动刷新：有默认档自动按他的档出价，散客回零售价
+                    applyCustomerPrice(
+                      v === WALK_IN ? null : (customers.find((c) => String(c.id) === v) ?? null),
+                    )
                   }
                 }}
               >
@@ -1086,7 +1249,7 @@ export function OutboundPage() {
           </DialogHeader>
           <div className="space-y-4">
             {renderExchPicker('退回的旧商品', exchOld, setExchOld, exchOldKw, setExchOldKw, exchNew?.id ?? null)}
-            {renderExchPicker('换出的新商品', exchNew, setExchNew, exchNewKw, setExchNewKw, exchOld?.id ?? null)}
+            {renderExchPicker('换出的新商品', exchNew, selectExchNew, exchNewKw, setExchNewKw, exchOld?.id ?? null)}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
                 <Label>数量 *</Label>
@@ -1110,6 +1273,97 @@ export function OutboundPage() {
                 />
               </div>
             </div>
+
+            {/* 谁换的货：补的钱要赊账必须选客户；退差价冲欠款按原单客户自动认 */}
+            <div className="space-y-1">
+              <Label>谁换的货</Label>
+              <Select value={exchCustKey} onValueChange={selectExchCustomer}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={WALK_IN}>散客（当场结清）</SelectItem>
+                  {customers.map((c) => (
+                    <SelectItem key={c.id} value={String(c.id)}>
+                      {c.name}
+                      {c.outstanding > 0 ? `（还欠 ${formatPrice(c.outstanding)}）` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* 差价试算：选好新旧货和数量后实时显示 */}
+            {exchDiff != null && exchOldPrice && (
+              <div
+                className={cn(
+                  'space-y-1 rounded-xl border px-4 py-3 text-[15px]',
+                  exchDiff > 0
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : exchDiff < 0
+                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-600',
+                )}
+              >
+                <div className="font-medium">
+                  {exchDiff > 0
+                    ? `新货比旧货贵 ${formatPrice(exchDiff)}，要补钱`
+                    : exchDiff < 0
+                      ? `新货比旧货便宜 ${formatPrice(-exchDiff)}，要退钱`
+                      : '新旧货一样价，不用补也不用退'}
+                </div>
+                <div className="text-xs opacity-80">
+                  旧货按 {formatPrice(exchOldPrice.unitPrice)} 算
+                  {exchOldPrice.source !== 'transaction' && '（没找到售价记录，按建议价算）'}
+                </div>
+              </div>
+            )}
+
+            {/* 补钱：实收默认全补，可选「补的钱也先欠着」（必须选客户） */}
+            {exchDiff != null && exchDiff > 0 && (
+              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="space-y-1">
+                  <Label>补的钱实收多少（元）</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={exchDiffOnCredit ? '0.00' : exchDiffPaid}
+                    onChange={(e) => setExchDiffPaid(e.target.value)}
+                    disabled={exchDiffOnCredit}
+                    className="h-12 text-xl font-bold tabular-nums"
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+                  <span>
+                    {exchDiffOnCredit
+                      ? `补的钱先欠着，记到「${exchCustomer?.name ?? '—'}」账上`
+                      : '补的钱当场收'}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setExchDiffOnCredit(!exchDiffOnCredit)}
+                  >
+                    {exchDiffOnCredit ? '改成当场收' : '补的钱也先欠着'}
+                  </Button>
+                </div>
+                {exchDiffOnCredit && !exchCustomer && (
+                  <div className="text-sm text-red-600">
+                    先在上面选一个客户，才能把补的钱记他账上
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 退钱：处理方式说明（原单赊账未付清的冲欠款，否则退现金） */}
+            {exchDiff != null && exchDiff < 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+                {exchRefundOffsetCust
+                  ? `原单是「${exchRefundOffsetCust.name}」赊的还没付清，差价 ${formatPrice(-exchDiff)} 从他欠的钱里扣`
+                  : `差价 ${formatPrice(-exchDiff)} 退现金给顾客`}
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setExchOpen(false)} disabled={exchBusy}>
@@ -1122,6 +1376,9 @@ export function OutboundPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 小票预览/打印 Dialog：出库成功后从「打印小票」按钮打开 */}
+      <ReceiptDialog data={receipt} open={receiptOpen} onOpenChange={setReceiptOpen} />
     </div>
   )
 }

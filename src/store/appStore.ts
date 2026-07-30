@@ -57,11 +57,28 @@ export interface NewProductInput {
 
 export type FontSizeMode = 'normal' | 'large'
 
-/** 赊账出库的记账参数：customerId=记账客户（散客为 null）；paidAmount=实收（分），省略=全额付清 */
+/** 赊账出库的记账参数：customerId=记账客户（散客为 null）；paidAmount=实收（分），省略=全额付清；
+ * tier=价格档（可选）：显式售价优先，没传售价时按这档定价，没设这档回退建议零售价（与后端 confirmOutbound 口径一致） */
 export interface CreditOptions {
   customerId?: number | null
   paidAmount?: number | null
+  tier?: PriceLevel | null
 }
+
+/** 换货结果（与后端 createExchange 返回对齐）：diff>0 客户补钱，diff<0 退钱（refundHandling 说明实际处理方式） */
+export type ExchangeResult =
+  | {
+      ok: true
+      diff: number | null // 新腿售价合计 - 旧腿原售价合计（分）
+      diffPaid: number | null // 差价实收（分）
+      diffCredit: number // 差价赊欠额（分）
+      oldUnitPrice: number // 旧腿原售价单价（分）
+      oldPriceSource: 'transaction' | 'suggest' | 'none' // 旧价来源：最近售价流水 / 建议价 / 都没有按 0
+      refund?: number // 退差价金额（分，diff<0 时）
+      refundHandling?: 'credit_offset' | 'cash'
+      refundCustomerId?: number
+    }
+  | { ok: false; shortage: number }
 
 // 本机偏好设置持久化（本项目仅有的两个 localStorage 用途）；
 // 读写都包 try/catch，隐私模式/异常环境下退回默认值而不是炸掉
@@ -150,14 +167,16 @@ interface AppState {
     operator: string,
     customerId?: number | null,
   ) => Promise<void>
-  /** 换货登记：先退旧货再出新货（FIFO），sellingPrice 为新货售价（分）；新货库存不足返回 shortage */
+  /** 换货登记：先退旧货再出新货（FIFO），sellingPrice 为新货售价（分）；新货库存不足返回 shortage。
+   * opts.customerId=换货客户（差价赊账必传）；opts.diffPaidAmount=差价实收（分），省略=差价全额付清 */
   addExchange: (
     oldProductId: number,
     newProductId: number,
     quantity: number,
     sellingPrice: number | null,
     operator: string,
-  ) => Promise<{ ok: true } | { ok: false; shortage: number }>
+    opts?: { customerId?: number | null; diffPaidAmount?: number | null },
+  ) => Promise<ExchangeResult>
 
   addSupplier: (s: Omit<Supplier, 'id'>) => Promise<void>
   updateSupplier: (id: number, s: Omit<Supplier, 'id'>) => Promise<void>
@@ -188,10 +207,15 @@ interface AppState {
 
   /** 拉取客户列表（带欠款统计）；Electron 走 customer:list，mock 路径本地重算 */
   loadCustomers: () => Promise<void>
-  addCustomer: (input: { name: string; phone: string | null; notes: string | null }) => Promise<Customer>
+  addCustomer: (input: {
+    name: string
+    phone: string | null
+    notes: string | null
+    price_level?: PriceLevel | null
+  }) => Promise<Customer>
   updateCustomer: (
     id: number,
-    input: { name: string; phone: string | null; notes: string | null },
+    input: { name: string; phone: string | null; notes: string | null; price_level?: PriceLevel | null },
   ) => Promise<void>
   /** 有流水/还款记录的客户后端会拒绝删除，原因经 Error.message 抛出 */
   deleteCustomer: (id: number) => Promise<void>
@@ -232,8 +256,13 @@ export function computeCustomerStats(
     let totalCredit = 0
     let lastTxAt: string | null = null
     for (const t of transactions) {
-      if (t.customer_id !== c.id || t.selling_price == null) continue
-      if (t.type === 'out') {
+      if (t.customer_id !== c.id) continue
+      if (t.type === 'exchange') {
+        // 换货退差价：paid_amount 为负退款额，记了 customer_id 的就是冲减欠款（与后端 netCreditOf 同口径）
+        totalCredit += t.paid_amount ?? 0
+      } else if (t.selling_price == null) {
+        continue
+      } else if (t.type === 'out') {
         totalCredit += t.quantity * t.selling_price - (t.paid_amount ?? t.quantity * t.selling_price)
       } else if (t.type === 'return') {
         totalCredit -= t.quantity * t.selling_price
@@ -258,6 +287,20 @@ export function computeCustomerStats(
       last_deal_at: lasts.length > 0 ? lasts.reduce((a, b) => (a > b ? a : b)) : null,
     }
   })
+}
+
+/** 客户价格档自动定价（与后端 confirmOutbound 的 tier 口径一致）：
+ * 客户设了档且商品设了这档价 → 用档次价；商品没设这档 → 回退建议零售价（不报错）；
+ * 散客/没设档的客户按零售档，零售档也没设 → 建议零售价 */
+export function priceForCustomer(
+  product: Product,
+  tiers: PriceTier[],
+  customer: Pick<Customer, 'price_level'> | null,
+): { price: number | null; tier: PriceLevel | null } {
+  const level: PriceLevel = customer?.price_level ?? 'retail'
+  const row = tiers.find((t) => t.product_id === product.id && t.tier === level)
+  if (row) return { price: row.price, tier: level }
+  return { price: product.suggest_price, tier: null }
 }
 
 function genBatchNo(seq: number): string {
@@ -451,6 +494,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         operator,
         customerId: credit?.customerId ?? null,
         paidAmount: credit?.paidAmount ?? null,
+        tier: credit?.tier ?? null,
       })
       if (result.ok) {
         await get().loadAll()
@@ -460,11 +504,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       return result
     }
     const state = get()
+    // 多级定价（与后端同口径）：没传显式售价但传了价格档 → 该档定价，没设这档回退建议零售价
+    let price = unitPrice
+    if (price == null && credit?.tier != null) {
+      const tierRow = state.priceTiers.find((t) => t.product_id === productId && t.tier === credit.tier)
+      price = tierRow?.price ?? state.products.find((p) => p.id === productId)?.suggest_price ?? null
+    }
     const plan = computeFifoPlan(state.batchesOf(productId), quantity)
     if (!plan.ok) return { ok: false, shortage: plan.shortage }
 
     // 赊账校验与后端 confirmOutbound 一致：实收不能超过应付，不满额必须选客户
-    const totalDue = unitPrice != null ? quantity * unitPrice : null
+    const totalDue = price != null ? quantity * price : null
     const paidAmount = credit?.paidAmount ?? null
     if (paidAmount != null && totalDue != null) {
       if (paidAmount > totalDue) throw new Error('实收金额不能超过应付总额')
@@ -477,7 +527,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     let paidLeft = isCredit ? paidAmount! : 0
     const newTxs: Transaction[] = plan.allocations.map((a) => {
       // 实收按批次行顺序摊销（与后端口径一致）；非赊账单 paid_amount 保持 null=全额付清
-      const lineDue = unitPrice != null ? a.deduct * unitPrice : 0
+      const lineDue = price != null ? a.deduct * price : 0
       const linePaid = isCredit ? Math.min(paidLeft, lineDue) : null
       if (linePaid !== null) paidLeft -= linePaid
       return {
@@ -487,7 +537,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         type: 'out',
         quantity: a.deduct,
         unit_price: a.cost_price, // 批次成本价（与后端语义一致）
-        selling_price: unitPrice ?? null, // 实际售价
+        selling_price: price ?? null, // 实际售价
         timestamp: now,
         operator,
         notes: null,
@@ -575,7 +625,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
-  addExchange: async (oldProductId, newProductId, quantity, sellingPrice, operator) => {
+  addExchange: async (oldProductId, newProductId, quantity, sellingPrice, operator, opts) => {
     if (backend) {
       const r = await backend.invoke('outbound:exchange', {
         oldProductId,
@@ -583,16 +633,64 @@ export const useAppStore = create<AppState>((set, get) => ({
         quantity,
         sellingPrice,
         operator,
+        customerId: opts?.customerId ?? null,
+        diffPaidAmount: opts?.diffPaidAmount ?? null,
       })
-      if (r?.ok) await get().loadAll()
+      if (r?.ok) {
+        await get().loadAll()
+        // 差价赊账/退差价冲减都会改客户欠款，单独刷新客户列表（loadAll 不含客户）
+        if (opts?.customerId != null || r?.refundHandling === 'credit_offset') {
+          await get().loadCustomers()
+        }
+      }
       return r
     }
-    // mock 路径与后端 createExchange 同逻辑：先验新货库存，再一次 set 完成退旧+出新
+    // mock 路径与后端 createExchange 同逻辑（简化版，生产以后端为准）：
+    // 先验新货库存，再一次 set 完成退旧+出新+差价记账
     const state = get()
     const old = state.products.find((p) => p.id === oldProductId)
     if (!old) throw new Error('旧商品不存在')
+    if (opts?.customerId != null && !state.customers.some((c) => c.id === opts.customerId)) {
+      throw new Error('客户不存在')
+    }
     const plan = computeFifoPlan(state.batchesOf(newProductId), quantity)
     if (!plan.ok) return { ok: false, shortage: plan.shortage }
+
+    // 旧腿原售价：最近一条带售价的出库流水 → 建议零售价 → 0（标注来源，与后端同口径）
+    const oldTx =
+      state.transactions.find(
+        (t) => t.product_id === oldProductId && t.type === 'out' && t.selling_price != null,
+      ) ?? null // transactions 新→旧排列，find 即最近一条
+    let oldUnitPrice: number
+    let oldPriceSource: 'transaction' | 'suggest' | 'none'
+    if (oldTx) {
+      oldUnitPrice = oldTx.selling_price!
+      oldPriceSource = 'transaction'
+    } else if (old.suggest_price != null) {
+      oldUnitPrice = old.suggest_price
+      oldPriceSource = 'suggest'
+    } else {
+      oldUnitPrice = 0
+      oldPriceSource = 'none'
+    }
+    const oldTotal = oldUnitPrice * quantity
+    const newTotal = sellingPrice != null ? sellingPrice * quantity : null
+    const diff = newTotal != null ? newTotal - oldTotal : null
+
+    // 差价实收校验（口径照后端：省略=全额付清；部分付/0=差价赊账，必须选客户）
+    let diffPaid: number | null = null
+    if (opts?.diffPaidAmount != null) {
+      if (diff == null) throw new Error('记差价实收时必须填写新货售价')
+      if (diff <= 0) {
+        if (opts.diffPaidAmount > 0) throw new Error('新货价格不高于旧货，无差价可收（应退差价）')
+      } else {
+        if (opts.diffPaidAmount > diff) throw new Error('差价实收不能超过差价')
+        if (opts.diffPaidAmount < diff && opts.customerId == null) throw new Error('赊账必须选客户')
+        diffPaid = opts.diffPaidAmount
+      }
+    }
+    // 本次换货的差价赊欠额（>0 才走赊账分摊：旧货价值视为已付）
+    const diffCredit = diff != null && diff > 0 && diffPaid != null && diffPaid < diff ? diff - diffPaid : 0
 
     const now = new Date().toISOString()
     let txId = nextId(state.transactions)
@@ -627,20 +725,68 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
     }
 
-    // 出新：按 FIFO 方案扣减，按正常出库类型记账（报表自动涵盖）
+    // 出新：按 FIFO 方案扣减，按正常出库类型记账（报表自动涵盖）；
+    // 差价赊账时实收分摊基数 = 新腿应付 - 赊欠差额，按 FIFO 顺序分摊
     const deductBy = new Map(plan.allocations.map((a) => [a.batch_id, a.remaining_after]))
     newBatches = newBatches.map((b) =>
       deductBy.has(b.id) ? { ...b, quantity: deductBy.get(b.id)! } : b,
     )
+    let paidLeft = diffCredit > 0 ? newTotal! - diffCredit : 0
     for (const a of plan.allocations) {
+      let linePaid: number | null = null
+      if (diffCredit > 0) {
+        linePaid = Math.min(a.deduct * sellingPrice!, paidLeft)
+        paidLeft -= linePaid
+      }
       newTxs.push({
         id: txId++, product_id: newProductId, batch_id: a.batch_id, type: 'out',
         quantity: a.deduct, unit_price: a.cost_price, selling_price: sellingPrice ?? null,
         timestamp: now, operator, notes: '换货出新',
+        customer_id: opts?.customerId ?? null, paid_amount: linePaid,
       })
     }
-    set((s) => ({ batches: newBatches, transactions: [...newTxs].reverse().concat(s.transactions) }))
-    return { ok: true }
+
+    // 退差价：退款 = -diff；原购买赊账未付清 → 冲减该客户欠款，否则退现金（与后端同口径）
+    let refund: number | undefined
+    let refundHandling: 'credit_offset' | 'cash' | undefined
+    let refundCustomerId: number | undefined
+    if (diff != null && diff < 0) {
+      refund = -diff
+      const oldUnpaid =
+        oldTx && oldTx.customer_id != null
+          ? oldTx.quantity * oldTx.selling_price! -
+            (oldTx.paid_amount ?? oldTx.quantity * oldTx.selling_price!)
+          : 0
+      refundHandling = oldUnpaid > 0 ? 'credit_offset' : 'cash'
+      refundCustomerId = refundHandling === 'credit_offset' ? oldTx!.customer_id! : undefined
+      newTxs.push({
+        id: txId++, product_id: oldProductId, batch_id: null, type: 'exchange',
+        quantity, unit_price: null, selling_price: null,
+        timestamp: now, operator, notes: '换货退差价',
+        customer_id: refundCustomerId ?? null, paid_amount: -refund,
+      })
+    }
+
+    const transactions = [...newTxs].reverse().concat(state.transactions)
+    set((s) => ({
+      batches: newBatches,
+      transactions,
+      customers:
+        opts?.customerId != null || refundHandling === 'credit_offset'
+          ? computeCustomerStats(s.customers, transactions, s.payments)
+          : s.customers,
+    }))
+    return {
+      ok: true,
+      diff,
+      diffPaid: diff == null ? null : diff > 0 ? (diffPaid ?? diff) : 0,
+      diffCredit,
+      oldUnitPrice,
+      oldPriceSource,
+      refund,
+      refundHandling,
+      refundCustomerId,
+    }
   },
 
   addSupplier: async (input) => {
@@ -887,6 +1033,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       name: input.name.trim(),
       phone: input.phone?.trim() || null,
       notes: input.notes?.trim() || null,
+      price_level: input.price_level ?? null,
     }
     if (!payload.name) throw new Error('客户姓名不能为空')
     if (backend) {
@@ -913,6 +1060,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       name: input.name.trim(),
       phone: input.phone?.trim() || null,
       notes: input.notes?.trim() || null,
+      // 传 null=清除档位回零售默认（后端 updateCustomer 同口径）
+      price_level: input.price_level ?? null,
     }
     if (!payload.name) throw new Error('客户姓名不能为空')
     if (backend) {

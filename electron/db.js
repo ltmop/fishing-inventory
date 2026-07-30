@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS customers (
     name TEXT NOT NULL,
     phone TEXT,
     notes TEXT,
+    -- 客户绑定价格档（可空，NULL=零售默认；老库由 migrateCustomerPriceLevel 补）
+    price_level TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -202,6 +204,7 @@ export function openDatabase(dbPath) {
   migrateOldProductsTable(db)
   migrateCreditPack(db)
   migrateFishingAttrs(db)
+  migrateCustomerPriceLevel(db)
   const row = db.prepare('SELECT COUNT(*) AS n FROM products').get()
   if (row.n === 0) seedDatabase(db)
   return db
@@ -309,6 +312,15 @@ function migrateCreditPack(db) {
     CREATE INDEX IF NOT EXISTS idx_transactions_customer ON transactions(customer_id);
     CREATE INDEX IF NOT EXISTS idx_payments_customer ON payments(customer_id);
   `)
+}
+
+// ---------- 客户价格档迁移：老库 customers 补 price_level（只增不改；NULL=零售默认） ----------
+function migrateCustomerPriceLevel(db) {
+  const addCol = (table, column, ddl) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name)
+    if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
+  }
+  addCol('customers', 'price_level', 'price_level TEXT')
 }
 
 /** 软件正常退出时调用一次：收尾 checkpoint，截断 WAL */

@@ -156,9 +156,10 @@ export const mockStockTakeItems: StockTakeItem[] = [  { id: 1, stock_take_id: 1,
 // ---------- 赊账包 mock：客户与还款 ----------
 // 老王（id=1）有一笔赊账流水（见 mockTransactions 第一条）：欠 ¥70，微信还了 ¥50，还欠 ¥20
 export const mockCustomers: Customer[] = [
-  { id: 1, name: '老王', phone: '13812345678', notes: '老钓友，常赊账，月底结', created_at: daysAgo(20) },
-  { id: 2, name: '小刘', phone: '13987654321', notes: null, created_at: daysAgo(12) },
-  { id: 3, name: '码头张老板', phone: null, notes: '包船出海的，拿货量大', created_at: daysAgo(9) },
+  { id: 1, name: '老王', phone: '13812345678', notes: '老钓友，常赊账，月底结', price_level: 'regular', created_at: daysAgo(20) },
+  { id: 2, name: '小刘', phone: '13987654321', notes: null, price_level: null, created_at: daysAgo(12) },
+  // 张老板是批发客户：出库选他自动按批发价出
+  { id: 3, name: '码头张老板', phone: null, notes: '包船出海的，拿货量大', price_level: 'wholesale', created_at: daysAgo(9) },
 ]
 
 export const mockPayments: Payment[] = [

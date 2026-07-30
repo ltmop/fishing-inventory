@@ -3,6 +3,8 @@
 //       / 赊账包（客户余额模型：客户 CRUD、赊销/还款/预收、对账单、退货冲减）
 //       / SKU 简化（条码即 SKU、无条码 1001 递增）/ 盘点按品类/供应商筛选
 //       / 采购订单（建单→部分收货→收齐完成/取消/超订拒绝/原子性）/ 多级定价（档次价设删查 + 出库接入）
+//       / 客户价格档（建改查/非法拒绝/老库迁移）/ 换货差价（补差价/退差价/赊账口径/原子性）
+//       / 手机写接口（POST /api/outbound 全链路 + 安全加固 + 只读端点不回退）
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -1254,6 +1256,300 @@ const tierChannels = ['priceTier:set', 'priceTier:delete', 'priceTier:list']
 ok('main.js 注册价格档次通道', tierChannels.every((ch) => mainSrc.includes(`'${ch}'`)))
 ok('preload 白名单含价格档次通道', tierChannels.every((ch) => preloadSrc.includes(`'${ch}'`)))
 pdb.close()
+
+// 23. 客户价格档：建/改/查 + 非法档拒绝 + 老库迁移补列（NULL=零售默认）
+const ldb = openDatabase(path.join(tmp, 'level.db'))
+const lc1 = cmd.createCustomer(ldb, { name: 'VIP 客户', price_level: 'VIP' })
+ok('新建客户带价格档', lc1.price_level === 'VIP')
+const lc2 = cmd.createCustomer(ldb, { name: '普通客户' })
+ok('不传价格档默认 NULL（零售）', lc2.price_level === null)
+let badLevelErr = null
+try { cmd.createCustomer(ldb, { name: '黑档客户', price_level: '钻石' }) } catch (e) { badLevelErr = e }
+ok('非法价格档拒绝建档', badLevelErr !== null && badLevelErr.message.includes('价格档次必须是'))
+ok('非法档未落库', cmd.listCustomers(ldb).every((c) => c.name !== '黑档客户'))
+const lc2Upd = cmd.updateCustomer(ldb, { id: lc2.id, price_level: 'wholesale' })
+ok('updateCustomer 设置价格档', lc2Upd.price_level === 'wholesale')
+const lc2Keep = cmd.updateCustomer(ldb, { id: lc2.id, phone: '13700000000' })
+ok('updateCustomer 不改价格档时保留', lc2Keep.price_level === 'wholesale' && lc2Keep.phone === '13700000000')
+const lc2Clear = cmd.updateCustomer(ldb, { id: lc2.id, price_level: null })
+ok('updateCustomer 传 null 清除价格档', lc2Clear.price_level === null)
+let badUpdLevelErr = null
+try { cmd.updateCustomer(ldb, { id: lc2.id, price_level: '熟人价' }) } catch (e) { badUpdLevelErr = e }
+ok('非法价格档拒绝修改', badUpdLevelErr !== null && badUpdLevelErr.message.includes('价格档次必须是'))
+ok('listCustomers 返回 price_level',
+  cmd.listCustomers(ldb).find((c) => c.id === lc1.id).price_level === 'VIP')
+ok('customerStatement 返回 price_level',
+  cmd.customerStatement(ldb, { customerId: lc1.id }).customer.price_level === 'VIP')
+// 五档全部合法
+for (const t of ['retail', 'regular', 'VIP', 'wholesale', 'promo']) {
+  cmd.updateCustomer(ldb, { id: lc2.id, price_level: t })
+}
+ok('五档价格档全部合法', cmd.updateCustomer(ldb, { id: lc2.id, price_level: 'promo' }).price_level === 'promo')
+ldb.close()
+// 老库迁移：手工建无 price_level 的老 customers 表，openDatabase 应补列且老数据为 NULL
+//（DatabaseSync 已在第 8 节迁移测试中导入）
+const oldLvlPath = path.join(tmp, 'level-old.db')
+const oldLvlRaw = new DatabaseSync(oldLvlPath)
+oldLvlRaw.exec(`CREATE TABLE customers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, notes TEXT, created_at TEXT NOT NULL)`)
+oldLvlRaw.prepare('INSERT INTO customers (name, created_at) VALUES (?, ?)').run('老客户', new Date().toISOString())
+oldLvlRaw.close()
+const oldLvlDb = openDatabase(oldLvlPath)
+ok('老库迁移补 price_level 列',
+  oldLvlDb.prepare('PRAGMA table_info(customers)').all().some((c) => c.name === 'price_level'))
+const oldLvlRow = cmd.listCustomers(oldLvlDb).find((c) => c.name === '老客户')
+ok('老数据 price_level 为 NULL（零售默认）', oldLvlRow !== undefined && oldLvlRow.price_level === null)
+oldLvlDb.close()
+
+// 24. 换货差价：补差价（全额/赊账/跨批次分摊）/退差价（现金/冲赊账）/散客赊差价报错/原子性
+const xdb = openDatabase(path.join(tmp, 'exchange.db'))
+const xStock = (pid) =>
+  xdb.prepare('SELECT COALESCE(SUM(quantity), 0) AS q FROM inventory_batches WHERE product_id = ?').get(pid).q
+// 旧竿：建议价 10000，入 5 件 @6000，先散客卖 2 件 @10000（留下原售价流水）
+const xo = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '鱼竿', brand: '换货牌', model: '旧竿',
+  cost_price: 6000, suggest_price: 10000,
+})
+cmd.createInbound(xdb, { productId: xo.id, quantity: 5, costPrice: 6000, operator: '测试' })
+cmd.confirmOutbound(xdb, { productId: xo.id, quantity: 2, sellingPrice: 10000, operator: '测试' })
+// 新竿：建议价 15000，入 10 件 @8000
+const xn = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '鱼竿', brand: '换货牌', model: '新竿',
+  cost_price: 8000, suggest_price: 15000,
+})
+cmd.createInbound(xdb, { productId: xn.id, quantity: 10, costPrice: 8000, operator: '测试' })
+
+// A. 补差价全额（diffPaidAmount 省略=全额付清）
+const exA = cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, operator: '测试' })
+ok('换货补差价：diff=新腿-旧腿原售价', exA.ok === true && exA.diff === 5000)
+ok('补差价省略实收=全额付清', exA.diffPaid === 5000 && exA.diffCredit === 0)
+ok('旧腿原售价取自原出库流水', exA.oldUnitPrice === 10000 && exA.oldPriceSource === 'transaction')
+ok('换货后库存：旧 +1 新 -1', xStock(xo.id) === 4 && xStock(xn.id) === 9)
+const exATx = xdb.prepare("SELECT * FROM transactions WHERE product_id = ? AND type = 'out' ORDER BY id DESC LIMIT 1").get(xn.id)
+ok('补差价全额新腿流水 paid_amount 为 NULL', exATx.selling_price === 15000 && exATx.paid_amount === null && exATx.customer_id === null)
+ok('旧腿仍按换货退旧记账',
+  xdb.prepare("SELECT COUNT(*) AS n FROM transactions WHERE product_id = ? AND type = 'return' AND notes = '换货退旧'").get(xo.id).n === 1)
+
+// B. 补差价赊账（部分付，欠款入账）
+const xc = cmd.createCustomer(xdb, { name: '换货老王' })
+const exB = cmd.createExchange(xdb, {
+  oldProductId: xo.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000,
+  customerId: xc.id, diffPaidAmount: 2000, operator: '测试',
+})
+ok('补差价赊账返回 diff/diffPaid/diffCredit', exB.diff === 5000 && exB.diffPaid === 2000 && exB.diffCredit === 3000)
+const exBTx = xdb.prepare("SELECT * FROM transactions WHERE product_id = ? AND type = 'out' ORDER BY id DESC LIMIT 1").get(xn.id)
+ok('赊账新腿流水记 customer_id，paid=应付-赊欠（旧货价值视为已付）',
+  exBTx.customer_id === xc.id && exBTx.paid_amount === 12000)
+ok('换货差价计入客户欠款', cmd.listCustomers(xdb).find((c) => c.id === xc.id).outstanding === 3000)
+
+// B2. 跨批次出新 + 差价赊账：实收按 FIFO 分摊，未覆盖批次记 0
+const xn2 = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '渔轮', brand: '换货牌', model: '新轮',
+  cost_price: 7000, suggest_price: 15000,
+})
+cmd.createInbound(xdb, { productId: xn2.id, quantity: 3, costPrice: 7000, operator: '测试' })
+cmd.createInbound(xdb, { productId: xn2.id, quantity: 5, costPrice: 7100, operator: '测试' })
+const exB2 = cmd.createExchange(xdb, {
+  oldProductId: xo.id, newProductId: xn2.id, quantity: 4, sellingPrice: 15000,
+  customerId: xc.id, diffPaidAmount: 1000, operator: '测试',
+})
+ok('跨批次补差价：diff=4×(15000-10000)', exB2.diff === 20000 && exB2.diffPaid === 1000 && exB2.diffCredit === 19000)
+const exB2Rows = xdb
+  .prepare("SELECT paid_amount FROM transactions WHERE product_id = ? AND type = 'out' AND notes = '换货出新' ORDER BY id ASC")
+  .all(xn2.id)
+ok('跨批次实收分摊：先批次 41000、后批次 0', exB2Rows.length === 2 && exB2Rows[0].paid_amount === 41000 && exB2Rows[1].paid_amount === 0)
+ok('跨批次换货欠款累计入账', cmd.listCustomers(xdb).find((c) => c.id === xc.id).outstanding === 22000)
+
+// C. 退差价退现金（原购买非赊账）
+const xm = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '鱼线', brand: '换货牌', model: '便宜线',
+  cost_price: 3000, suggest_price: 5000,
+})
+cmd.createInbound(xdb, { productId: xm.id, quantity: 5, costPrice: 3000, operator: '测试' })
+const exC = cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xm.id, quantity: 1, sellingPrice: 5000, operator: '测试' })
+ok('退差价：diff 为负', exC.ok === true && exC.diff === -5000 && exC.refund === 5000)
+ok('原购买非赊账退现金', exC.refundHandling === 'cash')
+const exCTx = xdb.prepare("SELECT * FROM transactions WHERE type = 'exchange' ORDER BY id DESC LIMIT 1").get()
+ok('退差价记 type=exchange 数量为正、paid_amount 为负退款额、notes 标注',
+  exCTx.product_id === xo.id && exCTx.quantity === 1 && exCTx.paid_amount === -5000 &&
+  exCTx.customer_id === null && exCTx.notes.includes('换货退差价'))
+ok('现金退差价不影响任何客户欠款', cmd.listCustomers(xdb).find((c) => c.id === xc.id).outstanding === 22000)
+
+// D. 退差价冲赊账（原购买赊账未付清，优先冲欠款）
+const xd = cmd.createCustomer(xdb, { name: '换货老李' })
+const xp = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '浮漂', brand: '换货牌', model: '赊销漂',
+  cost_price: 4000, suggest_price: 8000,
+})
+cmd.createInbound(xdb, { productId: xp.id, quantity: 5, costPrice: 4000, operator: '测试' })
+cmd.confirmOutbound(xdb, { productId: xp.id, quantity: 1, sellingPrice: 8000, customerId: xd.id, paidAmount: 3000, operator: '测试' })
+ok('赊账购买后欠 5000', cmd.listCustomers(xdb).find((c) => c.id === xd.id).outstanding === 5000)
+const xq = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '鱼钩', brand: '换货牌', model: '便宜钩',
+  cost_price: 1500, suggest_price: 3000,
+})
+cmd.createInbound(xdb, { productId: xq.id, quantity: 5, costPrice: 1500, operator: '测试' })
+const exD = cmd.createExchange(xdb, { oldProductId: xp.id, newProductId: xq.id, quantity: 1, sellingPrice: 3000, operator: '测试' })
+ok('退差价冲赊账返回处理方式', exD.diff === -5000 && exD.refund === 5000 && exD.refundHandling === 'credit_offset' && exD.refundCustomerId === xd.id)
+const exDTx = xdb.prepare("SELECT * FROM transactions WHERE type = 'exchange' ORDER BY id DESC LIMIT 1").get()
+ok('冲赊账 exchange 流水记原客户', exDTx.customer_id === xd.id && exDTx.paid_amount === -5000)
+ok('欠款被退差价冲减为 0', cmd.listCustomers(xdb).find((c) => c.id === xd.id).outstanding === 0)
+
+// E. 错误路径 + 原子性
+const xoStockE = xStock(xo.id)
+const xnStockE = xStock(xn.id)
+const txCountE = xdb.prepare('SELECT COUNT(*) AS n FROM transactions').get().n
+let walkinErr = null
+try {
+  cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, diffPaidAmount: 2000, operator: '测试' })
+} catch (e) { walkinErr = e }
+ok('散客赊差价报"赊账必须选客户"', walkinErr !== null && walkinErr.message.includes('赊账必须选客户'))
+ok('报错后零写入（原子性）',
+  xdb.prepare('SELECT COUNT(*) AS n FROM transactions').get().n === txCountE &&
+  xStock(xo.id) === xoStockE && xStock(xn.id) === xnStockE)
+let overDiffErr = null
+try {
+  cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, customerId: xc.id, diffPaidAmount: 6000, operator: '测试' })
+} catch (e) { overDiffErr = e }
+ok('差价实收超过差价报错', overDiffErr !== null && overDiffErr.message.includes('差价实收不能超过差价'))
+let badDiffCustErr = null
+try {
+  cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, customerId: 99999, diffPaidAmount: 2000, operator: '测试' })
+} catch (e) { badDiffCustErr = e }
+ok('换货客户不存在报错且零写入',
+  badDiffCustErr !== null && badDiffCustErr.message.includes('客户不存在') &&
+  xdb.prepare('SELECT COUNT(*) AS n FROM transactions').get().n === txCountE)
+// 库存不足依旧不落写入
+const exShort = cmd.createExchange(xdb, { oldProductId: xo.id, newProductId: xn.id, quantity: 999, sellingPrice: 15000, operator: '测试' })
+ok('换货库存不足返回 shortage', exShort.ok === false && exShort.shortage > 0 &&
+  xdb.prepare('SELECT COUNT(*) AS n FROM transactions').get().n === txCountE)
+// 旧腿原售价回退：无出库流水 → 建议零售价；都没有 → 0 并标注
+const xs = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '支架', brand: '换货牌', model: '未售支架',
+  cost_price: 5000, suggest_price: 9000,
+})
+cmd.createInbound(xdb, { productId: xs.id, quantity: 2, costPrice: 5000, operator: '测试' })
+const exS = cmd.createExchange(xdb, { oldProductId: xs.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, operator: '测试' })
+ok('无出库流水回退建议零售价', exS.oldPriceSource === 'suggest' && exS.oldUnitPrice === 9000 && exS.diff === 6000)
+const xz = cmd.createProduct(xdb, {
+  sku_code: '', barcode: null, category: '其他', brand: '换货牌', model: '无价货',
+  cost_price: 1000, suggest_price: null,
+})
+cmd.createInbound(xdb, { productId: xz.id, quantity: 2, costPrice: 1000, operator: '测试' })
+const exZ = cmd.createExchange(xdb, { oldProductId: xz.id, newProductId: xn.id, quantity: 1, sellingPrice: 15000, operator: '测试' })
+ok('原售价无处可寻按 0 并标注', exZ.oldPriceSource === 'none' && exZ.oldUnitPrice === 0 && exZ.diff === 15000)
+xdb.close()
+
+// 25. 手机写接口：POST /api/outbound 全链路 + 安全加固 + 只读端点不回退
+{
+  const wDir = path.join(tmp, 'srvw')
+  const wdb = openDatabase(path.join(tmp, 'write.db'))
+  const srvW = createInventoryServer({ db: wdb, dataDir: wDir, basePort: 0 })
+  const stW = await srvW.start()
+  const wBase = `http://127.0.0.1:${stW.port}`
+  const wToken = fs.readFileSync(path.join(wDir, 'server-token.txt'), 'utf8').trim()
+  const post = (body, headers = {}) =>
+    fetch(`${wBase}/api/outbound?token=${wToken}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    })
+
+  // 开单数据源：/api/inventory 扩展字段（id/建议价/各档价格/规格）
+  const wcust = cmd.createCustomer(wdb, { name: '手机客户', price_level: 'wholesale' })
+  cmd.setPriceTier(wdb, { productId: 1, tier: 'wholesale', price: 7000 })
+  const inv = await (await fetch(`${wBase}/api/inventory?token=${wToken}&q=${encodeURIComponent('赤刃')}`)).json()
+  ok('开单搜索带 id/建议价/库存', inv.length === 1 && inv[0].id === 1 && inv[0].suggestPrice === 8500 && inv[0].stock === 12)
+  ok('开单搜索带各档价格', inv[0].priceTiers.wholesale === 7000)
+  const wSpec = cmd.createProduct(wdb, {
+    sku_code: '', barcode: null, category: '鱼竿', brand: '手机牌', model: '测试竿',
+    cost_price: 1000, suggest_price: 2000, rod_length: '3.6m', color: '黑色',
+  })
+  cmd.createInbound(wdb, { productId: wSpec.id, quantity: 5, costPrice: 1000, operator: '测试' })
+  const invSpec = await (await fetch(`${wBase}/api/inventory?token=${wToken}&q=${encodeURIComponent('手机牌')}`)).json()
+  ok('开单搜索带规格字段', invSpec[0].specs.rod_length === '3.6m' && invSpec[0].specs.color === '黑色')
+  ok('无规格商品 specs 为空对象', Object.keys(inv[0].specs).length === 0)
+
+  // GET /api/customers：id/姓名/欠款/价格档
+  const custs = await (await fetch(`${wBase}/api/customers?token=${wToken}`)).json()
+  ok('客户端点返回 id/姓名/欠款/价格档',
+    custs.length === 1 && custs[0].id === wcust.id && custs[0].name === '手机客户' &&
+    custs[0].outstanding === 0 && custs[0].priceLevel === 'wholesale')
+  const rCustNoToken = await fetch(`${wBase}/api/customers`)
+  ok('客户端点无 token 401', rCustNoToken.status === 401)
+
+  // 开单成功：售价省略 → 建议价；库存减少、流水正确
+  const r1 = await post({ productId: 1, quantity: 2 })
+  const j1 = await r1.json()
+  ok('手机开单成功', r1.status === 200 && j1.ok === true)
+  ok('开单返回与桌面出库一致', j1.totalDue === 17000 && j1.paidAmount === null && j1.creditAmount === 0)
+  ok('开单后库存减少',
+    wdb.prepare('SELECT COALESCE(SUM(quantity),0) AS q FROM inventory_batches WHERE product_id = 1').get().q === 10)
+  const wTx = wdb.prepare("SELECT * FROM transactions WHERE product_id = 1 AND type = 'out' ORDER BY id DESC LIMIT 1").get()
+  ok('开单流水正确（建议价 + 操作员标注）', wTx.selling_price === 8500 && wTx.quantity === 2 && wTx.operator === '手机开单')
+
+  // 赊账开单：部分付款 → 欠款入账
+  const r2 = await post({ productId: 1, quantity: 1, sellingPrice: 8500, customerId: wcust.id, paidAmount: 5000 })
+  const j2 = await r2.json()
+  ok('手机赊账开单', r2.status === 200 && j2.creditAmount === 3500)
+  ok('手机开单欠款入账', cmd.listCustomers(wdb).find((c) => c.id === wcust.id).outstanding === 3500)
+  const r3 = await post({ productId: 1, quantity: 1, sellingPrice: 8500, paidAmount: 0 })
+  const j3 = await r3.json()
+  ok('散客赊账错误信息原样返回', r3.status === 400 && j3.error.includes('赊账必须选客户'))
+
+  // 安全加固：无 token / 错误 Content-Type / 超 body / 非法字段 / 未知字段 / 库存不足
+  const rNoTok = await fetch(`${wBase}/api/outbound`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ productId: 1, quantity: 1 }),
+  })
+  ok('写接口无 token 401', rNoTok.status === 401)
+  const rBadCt = await fetch(`${wBase}/api/outbound?token=${wToken}`, {
+    method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}',
+  })
+  ok('写接口错误 Content-Type 415', rBadCt.status === 415)
+  const rBig = await post({ productId: 1, quantity: 1, pad: 'x'.repeat(9000) })
+  ok('写接口超 8KB 请求体 413', rBig.status === 413)
+  const rBadQty = await post({ productId: 1, quantity: 0 })
+  const jBadQty = await rBadQty.json()
+  ok('写接口字段非法 400 且错误原样返回', rBadQty.status === 400 && jBadQty.error.includes('正整数'))
+  const rUnknown = await post({ productId: 1, quantity: 1, foo: 1 })
+  ok('写接口未知字段 400', rUnknown.status === 400 && (await rUnknown.json()).error.includes('未知字段'))
+  const rBadJson = await post('{not json')
+  ok('写接口非法 JSON 400', rBadJson.status === 400)
+  const rShort = await post({ productId: 1, quantity: 999 })
+  const jShort = await rShort.json()
+  ok('写接口库存不足 409', rShort.status === 409 && jShort.error.includes('库存不足'))
+
+  // 只读端点不回退：GET 正常、其他路径 POST 仍 405、未注册路径仍 404
+  ok('只读端点不受影响', (await fetch(`${wBase}/api/summary?token=${wToken}`)).status === 200)
+  ok('其他路径 POST 仍 405',
+    (await fetch(`${wBase}/api/summary?token=${wToken}`, { method: 'POST', body: '{}' })).status === 405)
+  ok('未注册路径仍 404', (await fetch(`${wBase}/api/products?token=${wToken}`)).status === 404)
+
+  // 手机页面含卖货页签
+  const wHtml = await (await fetch(`${wBase}/`)).text()
+  ok('手机页含卖货页签', wHtml.includes('卖货') && wHtml.includes('tab-btn-sell'))
+  ok('手机页含开单提交逻辑', wHtml.includes('/api/outbound') && wHtml.includes('sell-submit'))
+
+  await srvW.stop()
+
+  // 写接口独立限流：每 IP 每分钟 30 次（未授权写尝试也计数），第 31 次 429
+  const srvW2 = createInventoryServer({ db: wdb, dataDir: path.join(tmp, 'srvw2'), basePort: 0 })
+  const stW2 = await srvW2.start()
+  const w2Base = `http://127.0.0.1:${stW2.port}`
+  let lastWrite = 0
+  for (let i = 0; i < 30; i++) {
+    lastWrite = (await fetch(`${w2Base}/api/outbound`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    })).status
+  }
+  ok('30 次写请求内不被写限流（401 是鉴权拒绝而非限流）', lastWrite === 401)
+  ok('第 31 次写请求 429', (await fetch(`${w2Base}/api/outbound`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  })).status === 429)
+  ok('写限流不影响只读端点', (await fetch(`${w2Base}/`)).status === 200)
+  await srvW2.stop()
+  wdb.close()
+}
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(`\n全部 ${passed} 项断言通过`)

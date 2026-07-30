@@ -3,7 +3,7 @@ import { HandCoins, Loader2, Pencil, Plus, Trash2, Users } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { formatDateTime, formatPrice } from '@/lib/formatters'
 import { playSound } from '@/lib/sounds'
-import { PAYMENT_METHODS, type CustomerStatement, type CustomerWithStats, type PaymentMethod } from '@/types'
+import { PAYMENT_METHODS, PRICE_LEVELS, PRICE_LEVEL_LABELS, type CustomerStatement, type CustomerWithStats, type PaymentMethod, type PriceLevel } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -29,7 +29,13 @@ import {
 import { ErrorBanner, PageHeader, SuccessBanner } from '@/components/feedback'
 import { cn } from '@/lib/utils'
 
-const EMPTY_FORM = { name: '', phone: '', notes: '' }
+// price_level 为空字符串 = 零售默认（不设档）
+const EMPTY_FORM: { name: string; phone: string; notes: string; price_level: PriceLevel | '' } = {
+  name: '',
+  phone: '',
+  notes: '',
+  price_level: '',
+}
 
 function yuanToCents(v: string): number | null {
   const n = Number(v)
@@ -111,7 +117,7 @@ export function CustomersPage() {
 
   const openEdit = (c: CustomerWithStats) => {
     setEditingId(c.id)
-    setForm({ name: c.name, phone: c.phone ?? '', notes: c.notes ?? '' })
+    setForm({ name: c.name, phone: c.phone ?? '', notes: c.notes ?? '', price_level: c.price_level ?? '' })
     setFormError('')
     setFormOpen(true)
   }
@@ -124,7 +130,7 @@ export function CustomersPage() {
     }
     setSaving(true)
     try {
-      const payload = { name: form.name, phone: form.phone, notes: form.notes }
+      const payload = { name: form.name, phone: form.phone, notes: form.notes, price_level: form.price_level || null }
       if (editingId === null) await addCustomer(payload)
       else await updateCustomer(editingId, payload)
       setFormOpen(false)
@@ -325,6 +331,42 @@ export function CustomersPage() {
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
                 placeholder="方便催账时联系"
               />
+            </div>
+            {/* 默认价格档：选了他来买货自动按这个价，伙计不用手动输价 */}
+            <div className="space-y-2">
+              <Label>默认价格档</Label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, price_level: '' })}
+                  className={cn(
+                    'h-12 cursor-pointer rounded-xl border text-base font-medium transition-colors',
+                    form.price_level === ''
+                      ? 'border-brand-600 bg-brand-600 text-white shadow-sm'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                  )}
+                >
+                  零售
+                </button>
+                {PRICE_LEVELS.filter((l) => l !== 'retail').map((l) => (
+                  <button
+                    type="button"
+                    key={l}
+                    onClick={() => setForm({ ...form, price_level: l })}
+                    className={cn(
+                      'h-12 cursor-pointer rounded-xl border text-base font-medium transition-colors',
+                      form.price_level === l
+                        ? 'border-brand-600 bg-brand-600 text-white shadow-sm'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                    )}
+                  >
+                    {PRICE_LEVEL_LABELS[l]}
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                选了他来买货自动按这个价（商品设了这档价才生效，没设就按建议价），卖货时还能临时改
+              </div>
             </div>
             <div className="space-y-1">
               <Label>备注</Label>

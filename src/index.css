@@ -93,3 +93,29 @@
     min-width: 1024px;
   }
 }
+
+/* ===== 打印：小票 / 价格标签 ===== */
+/* .print-area 是 portal 到 body 的打印副本，屏幕上不显示；
+   body 挂上 print-receipt / print-labels 后，@media print 下藏掉 body 下其他一切
+   （#root 和 Radix Dialog 的 portal 都直接挂在 body 下），只留打印区。
+   打印区尺寸用 mm/px 固定字号，不受大字模式（html.text-large 改根字号）影响。 */
+.print-area {
+  display: none;
+}
+
+/* 不写死纸张尺寸：A4 由打印对话框默认给，以后接 58/80mm 热敏机时纸张大小由驱动决定；
+   只留 5mm 页边距，A4 标签排版（186×279mm）和小票都放得下 */
+@page {
+  margin: 5mm;
+}
+
+@media print {
+  body.print-receipt > *:not(.print-area),
+  body.print-labels > *:not(.print-area) {
+    display: none !important;
+  }
+  body.print-receipt .print-area,
+  body.print-labels .print-area {
+    display: block !important;
+  }
+}

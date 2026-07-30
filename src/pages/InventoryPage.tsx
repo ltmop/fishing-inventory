@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ChevronDown, ChevronRight, Download, Loader2, Pencil, Search, Trash2, TriangleAlert, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
+import { ChevronDown, ChevronRight, Download, Loader2, Pencil, Search, Tag, Trash2, TriangleAlert, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
+import { PriceLabelDialog } from '@/components/PriceLabel'
 import { formatDate, formatPrice, productName, csvCell } from '@/lib/formatters'
 import {
   SPEC_FIELDS, SPEC_LABELS, SPEC_PLACEHOLDERS, collectSpecs, formatSpecs,
@@ -111,6 +112,8 @@ export function InventoryPage() {
   const deletePriceTier = useAppStore((s) => s.deletePriceTier)
   const [editing, setEditing] = useState<Product | null>(null)
   const [deleting, setDeleting] = useState<Product | null>(null)
+  // 价格标签打印：点商品行里的「打标签」打开预览
+  const [labeling, setLabeling] = useState<Product | null>(null)
   // 保存防重复：await 期间置 busy，双击不会并发触发两次 updateProduct
   const [saving, setSaving] = useState(false)
   const [pageError, setPageError] = useState('')
@@ -438,7 +441,7 @@ export function InventoryPage() {
                     </button>
                   </TableHead>
                   <TableHead>货位</TableHead>
-                  <TableHead className="w-24 text-right">操作</TableHead>
+                  <TableHead className="w-28 text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -478,6 +481,15 @@ export function InventoryPage() {
                         <TableCell className="py-1.5">{p.location ?? '-'}</TableCell>
                         <TableCell className="py-1.5 text-right">
                           <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-7"
+                              title="打印价格标签"
+                              onClick={() => setLabeling(p)}
+                            >
+                              <Tag className="size-4 text-brand-600" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="icon"
@@ -748,6 +760,13 @@ export function InventoryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 价格标签预览/打印 Dialog：点商品行的「打标签」打开 */}
+      <PriceLabelDialog
+        product={labeling}
+        open={labeling !== null}
+        onOpenChange={(open) => !open && setLabeling(null)}
+      />
 
       {/* 删除确认 Dialog（危险操作二次确认） */}
       <Dialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>

@@ -1,18 +1,24 @@
-// 局域网只读 HTTP 服务：老板手机连店里同一个 WiFi，微信扫码看账
+// 局域网 HTTP 服务：老板手机连店里同一个 WiFi，微信扫码看账 + 开单卖货
 // 零依赖（Node 内置 http），不 import electron，db/dataDir 注入，可被 scripts/test-backend.mjs 直接单测
-// 安全基线：随机 token 鉴权（401）+ 路径白名单（404）+ GET only（405）+ 不解析请求体
-//           + 每 IP 120 次/分钟速率限制（429）+ 安全响应头；API 全程只读不写库
+// 安全基线：随机 token 鉴权（401）+ 路径白名单（404）+ 方法白名单（GET，POST 仅 /api/outbound，其余 405）
+//           + 每 IP 120 次/分钟速率限制（429）+ 安全响应头
+// 写接口（POST /api/outbound）加严：独立限流每 IP 30 次/分钟、Content-Type 必须 application/json、
+//           请求体限 8KB、字段白名单严格校验，业务校验与桌面端共用 commands.confirmOutbound
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import { confirmOutbound, listCustomers } from './commands.js'
 
 const DEFAULT_PORT = 17532
 const MAX_PORT_RETRY = 10
 // 与 DashboardPage 的 LOW_STOCK_THRESHOLD 保持一致
 const LOW_STOCK_THRESHOLD = 5
 const RATE_LIMIT_PER_MIN = 120
+// 写接口独立限流（更严）与请求体上限
+const WRITE_RATE_LIMIT_PER_MIN = 30
+const MAX_BODY_BYTES = 8192
 
 // ---------- 统计查询（口径参照 DashboardPage：金额单位分，退货冲减营业额/毛利） ----------
 
@@ -99,14 +105,18 @@ function queryLowStock(db) {
     }))
 }
 
-/** 库存搜索：关键词匹配品牌/型号/SKU/条码（LIKE 通配符转义），老板在仓库找货用 */
+/** 库存搜索：关键词匹配品牌/型号/SKU/条码（LIKE 通配符转义），老板在仓库找货/手机开单用 */
 function queryInventory(db, q) {
   const keyword = String(q ?? '').trim()
   if (!keyword) return []
   const like = `%${keyword.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+  const tierStmt = db.prepare('SELECT tier, price FROM price_tiers WHERE product_id = ?')
   return db
     .prepare(
-      `SELECT p.brand, p.model, p.sku_code, p.location, p.cost_price, COALESCE(s.q, 0) AS stock
+      `SELECT p.id, p.brand, p.model, p.sku_code, p.location, p.cost_price, p.suggest_price,
+              p.rod_length, p.rod_action, p.power_rating, p.line_number,
+              p.hook_size, p.color, p.material, p.expiry_date,
+              COALESCE(s.q, 0) AS stock
        FROM products p
        LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
          ON s.product_id = p.id
@@ -117,12 +127,39 @@ function queryInventory(db, q) {
     )
     .all(like, like, like, like)
     .map((r) => ({
+      id: r.id,
       name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
       sku: r.sku_code,
       stock: r.stock,
       costPrice: r.cost_price,
+      suggestPrice: r.suggest_price ?? null,
+      // 各档价格（retail/regular/VIP/wholesale/promo → 分），开单页按客户价格档自动带价
+      priceTiers: Object.fromEntries(tierStmt.all(r.id).map((t) => [t.tier, t.price])),
+      // 渔具规格（只带有值的字段）：长度/调性/硬度/线号/钩号/颜色/材质/保质期
+      specs: Object.fromEntries(
+        [
+          ['rod_length', r.rod_length],
+          ['rod_action', r.rod_action],
+          ['power_rating', r.power_rating],
+          ['line_number', r.line_number],
+          ['hook_size', r.hook_size],
+          ['color', r.color],
+          ['material', r.material],
+          ['expiry_date', r.expiry_date],
+        ].filter(([, v]) => v != null && v !== ''),
+      ),
       location: r.location,
     }))
+}
+
+/** 客户列表（手机开单选客户用）：id/姓名/当前欠款/价格档；口径与桌面端 listCustomers 一致 */
+function queryCustomers(db) {
+  return listCustomers(db).map((c) => ({
+    id: c.id,
+    name: c.name,
+    outstanding: c.outstanding,
+    priceLevel: c.price_level ?? null,
+  }))
 }
 
 /** 今日出入库流水（最近 50 条，金额：出库/退货记售价、入库记成本价，单位分） */
@@ -194,6 +231,25 @@ const MOBILE_PAGE = `<!DOCTYPE html>
   .empty { text-align: center; color: #94a3b8; font-size: 13px; padding: 18px 0; }
   .err { margin: 20px 16px; background: #fee2e2; color: #b91c1c; border-radius: 10px; padding: 14px; font-size: 14px; }
   .time { font-size: 12px; color: #94a3b8; }
+  .tabs { display: flex; gap: 10px; padding: 14px 16px 0; }
+  .tab { flex: 1; font-size: 19px; font-weight: 700; padding: 13px 0; border: none; border-radius: 12px; background: #cbd5e1; color: #334155; }
+  .tab.active { background: #1d4ed8; color: #fff; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 15px; font-weight: 600; margin-bottom: 6px; color: #1e3a5f; }
+  .field input, .field select { width: 100%; font-size: 20px; padding: 12px; border: 2px solid #94a3b8; border-radius: 10px; outline: none; background: #fff; }
+  .qty { display: flex; align-items: center; gap: 18px; }
+  .qty button { width: 58px; height: 58px; font-size: 30px; line-height: 1; border: none; border-radius: 12px; background: #1d4ed8; color: #fff; }
+  .qty span { font-size: 30px; font-weight: 800; min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
+  .pay-btns { display: flex; gap: 10px; }
+  .pay { flex: 1; font-size: 18px; font-weight: 700; padding: 13px 0; border-radius: 10px; border: 2px solid #1d4ed8; background: #fff; color: #1d4ed8; }
+  .pay.active { background: #1d4ed8; color: #fff; }
+  .sell-prod { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(30,58,95,.06); }
+  .sell-prod .name { font-size: 18px; font-weight: 700; }
+  .sell-prod .meta { font-size: 13px; color: #94a3b8; margin-top: 4px; font-family: monospace; }
+  .big-submit { width: 100%; font-size: 22px; font-weight: 800; padding: 17px 0; border: none; border-radius: 14px; background: #15803d; color: #fff; }
+  .big-submit:disabled { background: #94a3b8; }
+  .done { margin: 20px 16px 0; background: #dcfce7; color: #15803d; border-radius: 14px; padding: 24px 16px; font-size: 26px; font-weight: 800; text-align: center; line-height: 1.5; }
+  .pickable { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -202,6 +258,12 @@ const MOBILE_PAGE = `<!DOCTYPE html>
   <div class="sub" id="updated">数据加载中…</div>
 </header>
 
+<div class="tabs">
+  <button class="tab active" id="tab-btn-home">看店</button>
+  <button class="tab" id="tab-btn-sell">卖货</button>
+</div>
+
+<div id="page-home">
 <div class="cards">
   <div class="card"><div class="label">今日营业额</div><div class="value" id="v-revenue">-</div></div>
   <div class="card"><div class="label">今日毛利</div><div class="value green" id="v-profit">-</div></div>
@@ -223,6 +285,54 @@ const MOBILE_PAGE = `<!DOCTYPE html>
 <div class="section">
   <h2>今日流水</h2>
   <div id="today"><div class="empty">加载中…</div></div>
+</div>
+</div>
+
+<div id="page-sell" style="display:none">
+<div class="section">
+  <h2>1. 找商品</h2>
+  <input class="search" id="sell-q" type="search" placeholder="输入品牌/型号/SKU/条码" autocomplete="off">
+  <div id="sell-result"></div>
+</div>
+
+<div class="section" id="sell-form" style="display:none">
+  <h2>2. 开单</h2>
+  <div class="sell-prod">
+    <div class="name" id="sell-name"></div>
+    <div class="meta" id="sell-meta"></div>
+  </div>
+  <div class="field">
+    <label>数量</label>
+    <div class="qty">
+      <button id="q-minus" type="button">−</button>
+      <span id="q-num">1</span>
+      <button id="q-plus" type="button">＋</button>
+    </div>
+  </div>
+  <div class="field">
+    <label>单价（元，自动带价可改）</label>
+    <input id="sell-price" inputmode="decimal" autocomplete="off">
+  </div>
+  <div class="field">
+    <label>收款方式</label>
+    <div class="pay-btns">
+      <button class="pay active" id="pay-full" type="button">全额收款</button>
+      <button class="pay" id="pay-credit" type="button">欠款记账</button>
+    </div>
+  </div>
+  <div id="credit-box" style="display:none">
+    <div class="field">
+      <label>客户（欠款必须选人）</label>
+      <select id="sell-cust"></select>
+    </div>
+    <div class="field">
+      <label>本次实收（元，0 = 全欠）</label>
+      <input id="sell-paid" inputmode="decimal" value="0" autocomplete="off">
+    </div>
+  </div>
+  <button class="big-submit" id="sell-submit" type="button">确认卖出</button>
+</div>
+<div id="sell-done"></div>
 </div>
 
 <script>
@@ -316,6 +426,171 @@ function showErr(e) {
   d.textContent = e.message;
   document.body.appendChild(d);
 }
+
+// ---------- 卖货页签 ----------
+function showTab(name) {
+  document.getElementById('page-home').style.display = name === 'home' ? '' : 'none';
+  document.getElementById('page-sell').style.display = name === 'sell' ? '' : 'none';
+  document.getElementById('tab-btn-home').className = 'tab' + (name === 'home' ? ' active' : '');
+  document.getElementById('tab-btn-sell').className = 'tab' + (name === 'sell' ? ' active' : '');
+}
+document.getElementById('tab-btn-home').addEventListener('click', function () { showTab('home'); });
+document.getElementById('tab-btn-sell').addEventListener('click', function () { showTab('sell'); });
+
+var sellState = { prod: null, qty: 1, payMode: 'full', customers: null };
+
+function specText(specs) {
+  return Object.keys(specs || {}).map(function (k) { return specs[k]; }).join(' · ');
+}
+
+var sellSearchTimer = null;
+document.getElementById('sell-q').addEventListener('input', function (e) {
+  clearTimeout(sellSearchTimer);
+  var q = e.target.value.trim();
+  if (!q) { document.getElementById('sell-result').innerHTML = ''; return; }
+  sellSearchTimer = setTimeout(function () {
+    api('/api/inventory?q=' + encodeURIComponent(q)).then(function (items) {
+      var box = document.getElementById('sell-result');
+      box.innerHTML = '';
+      if (!items.length) { box.innerHTML = '<div class="empty">没搜到，换个关键词试试</div>'; return; }
+      items.forEach(function (it) {
+        var row = document.createElement('div');
+        row.className = 'row pickable';
+        var left = document.createElement('div');
+        var n = document.createElement('div'); n.className = 'name'; n.textContent = it.name;
+        var m = document.createElement('div'); m.className = 'meta';
+        m.textContent = it.sku + (specText(it.specs) ? ' · ' + specText(it.specs) : '');
+        left.appendChild(n); left.appendChild(m);
+        var right = document.createElement('div'); right.className = 'num';
+        right.innerHTML = '<span class="' + (it.stock < 5 ? 'red' : 'blue') + '">' + it.stock + ' 件</span>' +
+          '<div class="time">' + yuan(it.suggestPrice) + '</div>';
+        row.appendChild(left); row.appendChild(right);
+        row.addEventListener('click', function () { selectSell(it); });
+        box.appendChild(row);
+      });
+    }).catch(showErr);
+  }, 300);
+});
+
+function selectSell(it) {
+  sellState.prod = it;
+  sellState.qty = 1;
+  document.getElementById('q-num').textContent = '1';
+  document.getElementById('sell-name').textContent = it.name;
+  document.getElementById('sell-meta').textContent =
+    it.sku + ' · 库存 ' + it.stock + ' 件' + (specText(it.specs) ? ' · ' + specText(it.specs) : '');
+  document.getElementById('sell-price').value = it.suggestPrice != null ? (it.suggestPrice / 100).toFixed(2) : '';
+  applyTierPrice();
+  document.getElementById('sell-form').style.display = '';
+  var done = document.getElementById('sell-done');
+  done.innerHTML = '';
+}
+
+document.getElementById('q-minus').addEventListener('click', function () {
+  if (sellState.qty > 1) sellState.qty--;
+  document.getElementById('q-num').textContent = String(sellState.qty);
+});
+document.getElementById('q-plus').addEventListener('click', function () {
+  sellState.qty++;
+  document.getElementById('q-num').textContent = String(sellState.qty);
+});
+
+function setPayMode(mode) {
+  sellState.payMode = mode;
+  document.getElementById('pay-full').className = 'pay' + (mode === 'full' ? ' active' : '');
+  document.getElementById('pay-credit').className = 'pay' + (mode === 'credit' ? ' active' : '');
+  document.getElementById('credit-box').style.display = mode === 'credit' ? '' : 'none';
+  if (mode === 'credit' && !sellState.customers) loadCustomers();
+}
+document.getElementById('pay-full').addEventListener('click', function () { setPayMode('full'); });
+document.getElementById('pay-credit').addEventListener('click', function () { setPayMode('credit'); });
+
+function loadCustomers() {
+  api('/api/customers').then(function (list) {
+    sellState.customers = list;
+    var sel = document.getElementById('sell-cust');
+    sel.innerHTML = '';
+    if (!list.length) {
+      var o0 = document.createElement('option');
+      o0.value = '';
+      o0.textContent = '（店里还没有客户档案，请先在电脑上建档）';
+      sel.appendChild(o0);
+      return;
+    }
+    list.forEach(function (c) {
+      var o = document.createElement('option');
+      o.value = c.id;
+      o.textContent = c.name + '（欠 ' + yuan(c.outstanding) + '）';
+      sel.appendChild(o);
+    });
+    applyTierPrice();
+  }).catch(showErr);
+}
+document.getElementById('sell-cust').addEventListener('change', applyTierPrice);
+
+// 选了客户就自动应用他的价格档：该商品设了这档价就用档价，否则保持建议价/手填
+function applyTierPrice() {
+  var prod = sellState.prod;
+  if (!prod || !sellState.customers) return;
+  var sel = document.getElementById('sell-cust');
+  var cust = null;
+  for (var i = 0; i < sellState.customers.length; i++) {
+    if (String(sellState.customers[i].id) === sel.value) { cust = sellState.customers[i]; break; }
+  }
+  if (cust && cust.priceLevel && prod.priceTiers && prod.priceTiers[cust.priceLevel] != null) {
+    document.getElementById('sell-price').value = (prod.priceTiers[cust.priceLevel] / 100).toFixed(2);
+  }
+}
+
+function parseYuan(v, label) {
+  var n = parseFloat(String(v).trim());
+  if (!(n >= 0)) { showErr(new Error('请填写正确的' + label)); return null; }
+  return Math.round(n * 100);
+}
+
+var sellBtn = document.getElementById('sell-submit');
+sellBtn.addEventListener('click', function () {
+  if (sellBtn.disabled) return; // 防重复点击
+  var prod = sellState.prod;
+  if (!prod) return;
+  var price = parseYuan(document.getElementById('sell-price').value, '单价');
+  if (price == null) return;
+  var body = { productId: prod.id, quantity: sellState.qty, sellingPrice: price };
+  if (sellState.payMode === 'credit') {
+    var cid = parseInt(document.getElementById('sell-cust').value, 10);
+    if (!cid) { showErr(new Error('欠款记账必须选择客户')); return; }
+    var paid = parseYuan(document.getElementById('sell-paid').value || '0', '实收金额');
+    if (paid == null) return;
+    body.customerId = cid;
+    body.paidAmount = paid;
+  }
+  sellBtn.disabled = true;
+  sellBtn.textContent = '提交中…';
+  fetch('/api/outbound?token=' + encodeURIComponent(token), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(function (r) {
+    return r.json().then(function (j) { return { status: r.status, j: j }; });
+  }).then(function (res) {
+    if (res.status === 401) throw new Error('访问密码不对，请用店里电脑上最新的二维码重新扫码打开');
+    if (!res.j || !res.j.ok) throw new Error((res.j && res.j.error) || '开单失败（' + res.status + '）');
+    var msg = '已卖出，应收 ' + yuan(res.j.totalDue);
+    if (res.j.creditAmount > 0) msg += '<br>其中赊欠 ' + yuan(res.j.creditAmount);
+    document.getElementById('sell-done').innerHTML = '<div class="done">' + msg + '</div>';
+    // 重置开单区，顺手刷新看店数据（库存/今日流水已变）
+    sellState.prod = null;
+    document.getElementById('sell-form').style.display = 'none';
+    document.getElementById('sell-q').value = '';
+    document.getElementById('sell-result').innerHTML = '';
+    setPayMode('full');
+    loadAll();
+  }).catch(showErr).finally(function () {
+    sellBtn.disabled = false;
+    sellBtn.textContent = '确认卖出';
+  });
+});
+
 function loadAll() { loadSummary(); loadLowStock(); loadToday(); }
 loadAll();
 setInterval(loadAll, 30000);
@@ -339,6 +614,8 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
   let lastError = null
   // 速率限制：ip → 最近一分钟内的请求时间戳
   const hits = new Map()
+  // 写接口独立限流（更严）：ip → 最近一分钟内的写请求时间戳
+  const writeHits = new Map()
 
   function loadConfig() {
     try {
@@ -399,6 +676,42 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
     return false
   }
 
+  /** 写接口限流：每 IP 每分钟 30 次（未授权的写尝试也计数，防爆破） */
+  function writeRateLimited(ip) {
+    const nowMs = Date.now()
+    const cutoff = nowMs - 60_000
+    const list = (writeHits.get(ip) ?? []).filter((t) => t > cutoff)
+    if (list.length >= WRITE_RATE_LIMIT_PER_MIN) {
+      writeHits.set(ip, list)
+      return true
+    }
+    list.push(nowMs)
+    writeHits.set(ip, list)
+    return false
+  }
+
+  /** 读请求体，超过上限也读完再拒绝（避免半读状态污染连接复用） */
+  function readBody(req, limit) {
+    return new Promise((resolve, reject) => {
+      const chunks = []
+      let size = 0
+      let tooBig = false
+      req.on('data', (c) => {
+        size += c.length
+        if (size > limit) {
+          tooBig = true
+          return // 继续吞掉剩余数据，不再累积
+        }
+        chunks.push(c)
+      })
+      req.on('end', () => {
+        if (tooBig) reject(new Error('body too large'))
+        else resolve(Buffer.concat(chunks).toString('utf8'))
+      })
+      req.on('error', reject)
+    })
+  }
+
   /** 第一个非内部 IPv4 地址（手机访问用）；拿不到回退 127.0.0.1 */
   function lanIp() {
     for (const list of Object.values(os.networkInterfaces())) {
@@ -422,9 +735,106 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
     res.end(JSON.stringify(data))
   }
 
-  function handle(req, res) {
-    // GET only：写方法一律 405，请求体从不解析
-    if (req.method !== 'GET') {
+  /** token 提取：?token= 或 x-token / Authorization: Bearer 头（读写接口同一套） */
+  function tokenOf(req, url) {
+    return (
+      url.searchParams.get('token') ??
+      req.headers['x-token'] ??
+      (req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7)
+        : null)
+    )
+  }
+
+  /**
+   * 手机开单（全系统唯一写接口）：{productId, quantity, sellingPrice?(分), customerId?, paidAmount?(分)}
+   * sellingPrice 省略=商品建议零售价；paidAmount 省略=全额付清；部分付/0=赊账（必须选客户）。
+   * 校验链：写限流 → token → Content-Type → 8KB 上限 → JSON → 字段白名单/类型 →
+   * 业务校验与桌面端共用 commands.confirmOutbound（错误信息原样返回）。
+   */
+  const OUTBOUND_FIELDS = ['productId', 'quantity', 'sellingPrice', 'customerId', 'paidAmount']
+  async function handleOutbound(req, res, url) {
+    if (writeRateLimited(req.socket.remoteAddress ?? 'unknown')) {
+      sendJson(res, 429, { error: 'too many requests' })
+      return
+    }
+    if (!tokenOk(tokenOf(req, url))) {
+      sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+    const ct = String(req.headers['content-type'] ?? '').toLowerCase()
+    if (!ct.startsWith('application/json')) {
+      sendJson(res, 415, { error: 'Content-Type 必须是 application/json' })
+      return
+    }
+    let raw
+    try {
+      raw = await readBody(req, MAX_BODY_BYTES)
+    } catch {
+      sendJson(res, 413, { error: `请求体超过 ${MAX_BODY_BYTES / 1024}KB 上限` })
+      return
+    }
+    let body
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      sendJson(res, 400, { error: '请求体不是合法 JSON' })
+      return
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      sendJson(res, 400, { error: '请求体必须是 JSON 对象' })
+      return
+    }
+    const unknown = Object.keys(body).filter((k) => !OUTBOUND_FIELDS.includes(k))
+    if (unknown.length > 0) {
+      sendJson(res, 400, { error: `未知字段：${unknown.join('、')}（只允许 ${OUTBOUND_FIELDS.join('/')}）` })
+      return
+    }
+    if (!Number.isInteger(body.productId) || body.productId <= 0) {
+      sendJson(res, 400, { error: `productId 必须是正整数，收到：${body.productId}` })
+      return
+    }
+    if (body.customerId != null && (!Number.isInteger(body.customerId) || body.customerId <= 0)) {
+      sendJson(res, 400, { error: `customerId 必须是正整数，收到：${body.customerId}` })
+      return
+    }
+    const prod = db.prepare('SELECT id, suggest_price FROM products WHERE id = ?').get(body.productId)
+    if (!prod) {
+      sendJson(res, 400, { error: '商品不存在' })
+      return
+    }
+    // 售价省略 → 建议零售价（商品也没建议价则记 NULL，与桌面端"传 tier 回退"同口径）
+    const sellingPrice = body.sellingPrice ?? prod.suggest_price ?? null
+    try {
+      const r = confirmOutbound(db, {
+        productId: body.productId,
+        quantity: body.quantity,
+        sellingPrice,
+        customerId: body.customerId ?? null,
+        paidAmount: body.paidAmount ?? null,
+        operator: '手机开单',
+      })
+      if (!r.ok) {
+        sendJson(res, 409, { ok: false, error: `库存不足，还差 ${r.shortage} 件`, shortage: r.shortage })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        totalDue: r.totalDue,
+        paidAmount: r.paidAmount,
+        creditAmount: r.creditAmount,
+      })
+    } catch (e) {
+      // 业务校验错误（数量/金额非法、赊账必须选客户等）原样返回中文提示
+      sendJson(res, 400, { ok: false, error: e.message })
+    }
+  }
+
+  async function handle(req, res) {
+    // 方法白名单：GET + 唯一的写接口 POST /api/outbound，其余一律 405
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    const isWrite = req.method === 'POST' && url.pathname === '/api/outbound'
+    if (req.method !== 'GET' && !isWrite) {
       sendJson(res, 405, { error: 'method not allowed' })
       return
     }
@@ -432,8 +842,11 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       sendJson(res, 429, { error: 'too many requests' })
       return
     }
+    if (isWrite) {
+      await handleOutbound(req, res, url)
+      return
+    }
     // 路径严格白名单：URL 解析后精确匹配，不存在路径穿越问题
-    const url = new URL(req.url ?? '/', 'http://localhost')
     if (url.pathname === '/') {
       res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8' })
       res.end(MOBILE_PAGE)
@@ -444,6 +857,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       '/api/low-stock': () => queryLowStock(db),
       '/api/inventory': () => queryInventory(db, url.searchParams.get('q')),
       '/api/today': () => queryToday(db),
+      '/api/customers': () => queryCustomers(db),
     }
     const route = ROUTES[url.pathname]
     if (!route) {
@@ -451,13 +865,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       return
     }
     // token 鉴权：?token= 或 x-token / Authorization: Bearer 头
-    const provided =
-      url.searchParams.get('token') ??
-      req.headers['x-token'] ??
-      (req.headers.authorization?.startsWith('Bearer ')
-        ? req.headers.authorization.slice(7)
-        : null)
-    if (!tokenOk(provided)) {
+    if (!tokenOk(tokenOf(req, url))) {
       sendJson(res, 401, { error: 'unauthorized' })
       return
     }
@@ -468,16 +876,16 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
   function tryListen(p, attemptsLeft) {
     return new Promise((resolve, reject) => {
       const s = http.createServer((req, res) => {
-        try {
-          handle(req, res)
-        } catch (e) {
-          console.error('[server] 请求处理异常:', e)
-          try {
-            sendJson(res, 500, { error: 'internal error' })
-          } catch {
-            // 连接已断开等情况，忽略
-          }
-        }
+        Promise.resolve()
+          .then(() => handle(req, res))
+          .catch((e) => {
+            console.error('[server] 请求处理异常:', e)
+            try {
+              sendJson(res, 500, { error: 'internal error' })
+            } catch {
+              // 连接已断开等情况，忽略
+            }
+          })
       })
       s.once('error', (e) => {
         if (e.code === 'EADDRINUSE' && attemptsLeft > 0 && p !== 0) {
