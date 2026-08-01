@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { AiAssistantCard } from './settings/AiAssistantCard'
 import { BackupCard } from './settings/BackupCard'
 import { FeedbackCard } from './settings/FeedbackCard'
+import { CloudCard } from './settings/CloudCard'
 import { MobileServerCard, type ServerStatus } from './settings/MobileServerCard'
 import { ModelDownloadCard } from './settings/ModelDownloadCard'
 import { PreferenceRow } from './settings/PreferenceRow'
@@ -354,6 +355,9 @@ export function SettingsPage() {
         onSetExtraDir={handleSetExtraDir}
         onClearExtraDir={handleClearExtraDir}
       />
+
+      {/* 云备份 · 远程看店：Pro 版专属，关店后手机随时看账 */}
+      <CloudCard />
 
       {/* 手机看店：局域网只读服务，微信扫码看账 */}
       <MobileServerCard

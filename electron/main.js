@@ -19,6 +19,7 @@ import { createInventoryServer } from './server.js'
 import { createPhotoStore } from './photo.js'
 import { initAutoUpdater, checkForUpdates, downloadAndInstall } from './updater.js'
 import { loadLicense, activateLicense, machineFingerprint } from './license.js'
+import { initCloud, pairWithCloud, syncSnapshot, uploadBackup, listCloudBackups, restoreFromCloud, regenViewLink, getCloudState } from './cloud.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -324,6 +325,19 @@ function registerIpc() {
       return { ok: false, error: e.message }
     }
   })
+  // 云备份通道：配对/快照/备份/恢复/吊销
+  ipcMain.handle('cloud:status', () => getCloudState())
+  ipcMain.handle('cloud:pair', (_e, p) => pairWithCloud(p?.pairCode ?? ''))
+  ipcMain.handle('cloud:syncNow', () => syncSnapshot())
+  ipcMain.handle('cloud:backupNow', () => uploadBackup())
+  ipcMain.handle('cloud:listBackups', () => listCloudBackups())
+  ipcMain.handle('cloud:restore', async (_e, p) => {
+    if (!p?.date) return { ok: false, error: '缺少备份日期' }
+    // 恢复前先自动本地备份
+    try { backupNow(db, dbPath, backupDir) } catch { /* 备份失败不阻断恢复 */ }
+    return restoreFromCloud(p.date)
+  })
+  ipcMain.handle('cloud:regenViewLink', () => regenViewLink())
   // 应用信息（设置页展示数据位置 + 最近备份时间：扫描备份目录最新文件）
   ipcMain.handle('app:info', () => {
     let lastBackupAt = null
@@ -439,6 +453,8 @@ app.whenReady().then(() => {
   createWindow()
   // 自动更新：COS generic provider，try/catch 包裹——挂掉静默降级
   try { initAutoUpdater() } catch { /* 挂了是手动更新，不是打不开 */ }
+  // 云备份：try/catch 包裹——挂了是本地单机版，不是打不开
+  try { initCloud(db, dbPath, dataDir) } catch { /* 云挂了不影响本地用 */ }
   // 模型已就绪则在启动时预加载识别器（约 1s），首次按住说话零等待；模型缺失静默跳过
   voice.preloadRecognizer()
   // TTS 模型已就绪同样预加载合成器，首次播报零等待；缺失静默跳过（播报回退系统语音）

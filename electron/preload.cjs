@@ -80,6 +80,13 @@ const CHANNELS = new Set([
   'onboarding:status',
   'onboarding:reset',
   'onboarding:finish',
+  'cloud:status',
+  'cloud:pair',
+  'cloud:syncNow',
+  'cloud:backupNow',
+  'cloud:listBackups',
+  'cloud:restore',
+  'cloud:regenViewLink',
 ])
 
 contextBridge.exposeInMainWorld('fi', {

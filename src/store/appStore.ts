@@ -171,6 +171,10 @@ interface AppState {
   license: { activated: boolean; level: 'free' | 'pro'; expiresAt: string | null; machineId: string; daysLeft: number | null }
   setLicense: (s: { activated: boolean; level: 'free' | 'pro'; expiresAt: string | null; machineId: string; daysLeft: number | null }) => void
 
+  /** 云备份状态（cloud:status IPC） */
+  cloud: { paired: boolean; lastSyncAt: string | null; lastBackupAt: string | null; syncing: boolean; error: string | null; viewUrl: string | null }
+  setCloud: (s: Partial<{ paired: boolean; lastSyncAt: string | null; lastBackupAt: string | null; syncing: boolean; error: string | null; viewUrl: string | null }>) => void
+
   /** Electron 环境启动时调用一次：从 SQLite 拉全量数据进 store */
   loadAll: () => Promise<void>
 
@@ -457,6 +461,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   license: { activated: false, level: 'free', expiresAt: null, machineId: '', daysLeft: null },
   setLicense: (s) => set({ license: s }),
+
+  cloud: { paired: false, lastSyncAt: null, lastBackupAt: null, syncing: false, error: null, viewUrl: null },
+  setCloud: (s) => set((st) => ({ cloud: { ...st.cloud, ...s } })),
 
   loadAll: async () => {
     if (!backend) return
