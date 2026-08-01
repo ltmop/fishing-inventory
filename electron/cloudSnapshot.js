@@ -106,7 +106,7 @@ function queryInventory(db) {
 
 function queryReceivable(db) {
   const rows = db.prepare(
-    `SELECT c.id, c.name, c.phone,
+    `SELECT c.id,
             COALESCE((SELECT SUM(paid_amount) FROM transactions WHERE customer_id = c.id), 0) AS paid,
             COALESCE((SELECT SUM(selling_price * quantity) FROM transactions WHERE customer_id = c.id AND paid_amount IS NOT NULL), 0) AS owed
      FROM customers c`

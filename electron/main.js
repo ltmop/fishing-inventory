@@ -19,7 +19,7 @@ import { createInventoryServer } from './server.js'
 import { createPhotoStore } from './photo.js'
 import { initAutoUpdater, checkForUpdates, downloadAndInstall } from './updater.js'
 import { loadLicense, activateLicense, machineFingerprint } from './license.js'
-import { initCloud, pairWithCloud, syncSnapshot, uploadBackup, listCloudBackups, restoreFromCloud, regenViewLink, getCloudState } from './cloud.js'
+import { initCloud, pairWithCloud, syncSnapshot, uploadBackup, listCloudBackups, restoreFromCloud, regenViewLink, getCloudState, stopScheduler as stopCloudScheduler, exitSnapshot as exitCloudSnapshot } from './cloud.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -333,9 +333,15 @@ function registerIpc() {
   ipcMain.handle('cloud:listBackups', () => listCloudBackups())
   ipcMain.handle('cloud:restore', async (_e, p) => {
     if (!p?.date) return { ok: false, error: '缺少备份日期' }
-    // 恢复前先自动本地备份
-    try { backupNow(db, dbPath, backupDir) } catch { /* 备份失败不阻断恢复 */ }
-    return restoreFromCloud(p.date)
+    const r = await restoreFromCloud(p.date)
+    if (r?.ok) {
+      // 恢复成功后关闭所有窗口并重启
+      restoring = true
+      for (const win of BrowserWindow.getAllWindows()) win.close()
+      app.relaunch()
+      app.exit(0)
+    }
+    return r
   })
   ipcMain.handle('cloud:regenViewLink', () => regenViewLink())
   // 应用信息（设置页展示数据位置 + 最近备份时间：扫描备份目录最新文件）
@@ -454,7 +460,14 @@ app.whenReady().then(() => {
   // 自动更新：COS generic provider，try/catch 包裹——挂掉静默降级
   try { initAutoUpdater() } catch { /* 挂了是手动更新，不是打不开 */ }
   // 云备份：try/catch 包裹——挂了是本地单机版，不是打不开
-  try { initCloud(db, dbPath, dataDir) } catch { /* 云挂了不影响本地用 */ }
+  try {
+    initCloud(db, dbPath, dataDir, backupDir, () => {
+      try {
+        const lic = loadLicense(dataDir)
+        return lic.activated && lic.level === 'pro' && (lic.daysLeft === null || lic.daysLeft > 0)
+      } catch { return false }
+    })
+  } catch { /* 云挂了不影响本地用 */ }
   // 模型已就绪则在启动时预加载识别器（约 1s），首次按住说话零等待；模型缺失静默跳过
   voice.preloadRecognizer()
   // TTS 模型已就绪同样预加载合成器，首次播报零等待；缺失静默跳过（播报回退系统语音）
@@ -466,7 +479,10 @@ app.whenReady().then(() => {
 
   app.on('will-quit', () => {
     stopScheduler()
+    stopCloudScheduler()
     inventoryServer?.stop()
+    // 退出前 best-effort 传一次快照（500ms 超时，不阻塞退出）
+    exitCloudSnapshot().catch(() => {})
     // 恢复备份重启：旧连接视图已脱节，跳过收尾备份/checkpoint
     if (restoring) return
     // 退出收尾：备份一次 + checkpoint 截断 WAL
