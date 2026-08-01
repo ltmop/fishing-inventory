@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { ArrowDown, ArrowUp, CircleDollarSign, Download, Package, TrendingUp, Trophy, Users } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { formatDateTime, formatPrice, productName, csvCell } from '@/lib/formatters'
+import { DailyReconcileCard } from '@/pages/reports/DailyReconcileCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Table,
@@ -71,7 +72,8 @@ function marginText(m: number | null): string {
   return m === null ? '-' : `${(m * 100).toFixed(1)}%`
 }
 
-function StatCard({ title, stats }: { title: string; stats: Stats }) {
+function StatCard({ title, stats, expense }: { title: string; stats: Stats; expense: number }) {
+  const net = stats.profit - expense
   return (
     <Card className="h-full">
       <CardContent className="pt-6">
@@ -97,6 +99,23 @@ function StatCard({ title, stats }: { title: string; stats: Stats }) {
             <div className="text-xl font-bold tabular-nums text-slate-700">{marginText(stats.margin)}</div>
           </div>
         </div>
+        {/* 净利 = 毛利 − 支出：老板真正落袋的钱 */}
+        <div className="mt-3 flex items-end justify-between border-t pt-3">
+          <div>
+            <div className="text-xs text-slate-500">支出</div>
+            <div className="text-xl font-bold tabular-nums text-slate-700">
+              {formatPrice(Math.round(expense))}
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-slate-500">净利（毛利 − 支出）</div>
+            <div
+              className={`text-2xl font-bold tabular-nums ${net >= 0 ? 'text-brand-700' : 'text-red-600'}`}
+            >
+              {formatPrice(Math.round(net))}
+            </div>
+          </div>
+        </div>
       </CardContent>
     </Card>
   )
@@ -109,6 +128,7 @@ export function ReportsPage() {
   const products = useAppStore((s) => s.products)
   const batches = useAppStore((s) => s.batches)
   const customers = useAppStore((s) => s.customers)
+  const expenses = useAppStore((s) => s.expenses)
   const loadCustomers = useAppStore((s) => s.loadCustomers)
   const navigate = useNavigate()
 
@@ -132,6 +152,17 @@ export function ReportsPage() {
     const start = new Date(d.getFullYear(), d.getMonth(), 1)
     return aggregate(saleTxs.filter((t) => new Date(t.timestamp) >= start))
   }, [saleTxs])
+
+  // 支出（按 expense_date 本地日期归天，与上面流水同区间）：净利 = 毛利 − 支出
+  const todayExpense = useMemo(() => {
+    const today = dateKey(new Date())
+    return expenses.filter((e) => e.expense_date === today).reduce((s, e) => s + e.amount, 0)
+  }, [expenses])
+  const monthExpense = useMemo(() => {
+    const d = new Date()
+    const prefix = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-`
+    return expenses.filter((e) => e.expense_date.startsWith(prefix)).reduce((s, e) => s + e.amount, 0)
+  }, [expenses])
 
   // ========== 什么最赚钱：本月商品毛利排行 TOP20（可点表头排序） ==========
   const profitTop = useMemo(() => {
@@ -199,12 +230,14 @@ export function ReportsPage() {
     const yuan = (cents: number) => (cents / 100).toFixed(2)
     const lines = [
       '\uFEFF赚了多少',
-      '区间,营业额(元),毛利(元),毛利率,售出件数',
+      '区间,营业额(元),毛利(元),毛利率,支出(元),净利(元),售出件数',
       [
         '今天',
         yuan(todayStats.revenue),
         yuan(todayStats.profit),
         marginText(todayStats.margin),
+        yuan(todayExpense),
+        yuan(todayStats.profit - todayExpense),
         todayStats.qty,
       ].join(','),
       [
@@ -212,6 +245,8 @@ export function ReportsPage() {
         yuan(monthStats.revenue),
         yuan(monthStats.profit),
         marginText(monthStats.margin),
+        yuan(monthExpense),
+        yuan(monthStats.profit - monthExpense),
         monthStats.qty,
       ].join(','),
       '',
@@ -276,11 +311,14 @@ export function ReportsPage() {
         </button>
       </div>
 
-      {/* 赚了多少：今天 / 本月并排大数字 */}
+      {/* 赚了多少：今天 / 本月并排大数字（含支出与净利） */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <StatCard title="今天赚了多少" stats={todayStats} />
-        <StatCard title="本月赚了多少" stats={monthStats} />
+        <StatCard title="今天赚了多少" stats={todayStats} expense={todayExpense} />
+        <StatCard title="本月赚了多少" stats={monthStats} expense={monthExpense} />
       </div>
+
+      {/* 日结对账：任意区间看每天的营业额/毛利/收款方式/赊账 */}
+      <DailyReconcileCard transactions={transactions} />
 
       {/* 什么最赚钱 */}
       <Card>
@@ -440,7 +478,7 @@ export function ReportsPage() {
       {/* 毛利口径说明（老板看得懂的一句话） */}
       <div className="flex items-center gap-2 text-xs text-slate-400">
         <TrendingUp className="size-3.5" />
-        毛利 = 卖价 − 进货成本；退货按负数冲减；换货不影响营业额
+        毛利 = 卖价 − 进货成本；净利 = 毛利 − 支出（支出在「支出记账」页维护）；退货按负数冲减；换货不影响营业额
       </div>
     </div>
   )

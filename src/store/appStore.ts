@@ -2,9 +2,13 @@ import { create } from 'zustand'
 import type {
   AuditLogEntry,
   Category,
+  CheckoutLine,
+  CheckoutResult,
   Customer,
   CustomerStatement,
   CustomerWithStats,
+  Expense,
+  ExpenseInput,
   InventoryBatch,
   Payment,
   PaymentMethod,
@@ -26,6 +30,7 @@ import type {
 import { computeFifoPlan, type FifoAllocation } from '@/lib/fifo'
 import { productName } from '@/lib/formatters'
 import { backend } from '@/lib/api'
+import { PRODUCT_STATUSES, EXPENSE_CATEGORIES, PAYMENT_METHODS } from '@/types'
 
 export interface InboundInput {
   productId: number
@@ -58,16 +63,32 @@ export interface NewProductInput {
   expiry_date?: string | null
   /** 最低库存预警线（选填）：不设/清空 = 按默认阈值 5 预警 */
   min_stock?: number | null
+  /** 商品图片相对文件名（images 目录内）；仅 updateProduct 用，createProduct 一律 NULL 起步 */
+  photo_path?: string | null
 }
 
 export type FontSizeMode = 'normal' | 'large'
 
+/** 批量改价方式（与后端 batchUpdateProducts 对齐）：
+ * ratio=统一打折（0.9=9 折，分单位四舍五入）；fixed=统一改成固定价（分）。
+ * 两种方式都同时作用于建议售价和已设的各档价格 */
+export type BatchPriceMode = { kind: 'ratio'; ratio: number } | { kind: 'fixed'; priceFen: number }
+
+export interface BatchUpdateInput {
+  ids: number[]
+  priceMode?: BatchPriceMode
+  status?: ProductStatus
+  operator?: string
+}
+
 /** 赊账出库的记账参数：customerId=记账客户（散客为 null）；paidAmount=实收（分），省略=全额付清；
- * tier=价格档（可选）：显式售价优先，没传售价时按这档定价，没设这档回退建议零售价（与后端 confirmOutbound 口径一致） */
+ * tier=价格档（可选）：显式售价优先，没传售价时按这档定价，没设这档回退建议零售价（与后端 confirmOutbound 口径一致）；
+ * payMethod=到账方式（可选）：只有真正收到钱才落库，纯赊账强制落空（与后端口径一致） */
 export interface CreditOptions {
   customerId?: number | null
   paidAmount?: number | null
   tier?: PriceLevel | null
+  payMethod?: PaymentMethod | null
 }
 
 /** 换货结果（与后端 createExchange 返回对齐）：diff>0 客户补钱，diff<0 退钱（refundHandling 说明实际处理方式） */
@@ -132,6 +153,8 @@ interface AppState {
   purchaseOrderItems: PurchaseOrderItemDetail[]
   /** 全部商品的价格档次（loadAll 已带；mock 路径本地维护） */
   priceTiers: PriceTier[]
+
+  expenses: Expense[]
   /** 操作日志（audit:list 口径，时间倒序）；mock 路径写操作时本地顺手记，生产环境一律以后端 audit_log 表为准 */
   auditLogs: AuditLogEntry[]
   /** Electron 环境下是否已从 SQLite 加载完数据 */
@@ -155,6 +178,9 @@ interface AppState {
   addProduct: (input: NewProductInput) => Promise<Product>
   /** 编辑商品资料；SKU 编码创建后不可改 */
   updateProduct: (id: number, input: Partial<NewProductInput>) => Promise<void>
+  /** 批量修改商品：统一打折/统一改价（建议售价+已设档次价同步）和/或批量改状态；
+   * 任一 id 不存在整批失败，不落半截修改 */
+  batchUpdateProducts: (input: BatchUpdateInput) => Promise<{ ok: true; updated: number; tiersUpdated: number }>
   /** 删除商品；已有入库/出库记录的会被后端拒绝（应改「停产」） */
   deleteProduct: (id: number) => Promise<void>
   addInbound: (input: InboundInput) => Promise<void>
@@ -165,14 +191,23 @@ interface AppState {
     operator: string,
     credit?: CreditOptions,
   ) => Promise<{ ok: true; allocations: FifoAllocation[] } | { ok: false; shortage: number }>
+  /** 一单多商品收银台：多行商品同一事务出库，任一行缺货整单回滚；
+   * 收款口径同 confirmOutbound（credit.paidAmount 省略=全额付清，纯赊账 payMethod 不落库） */
+  checkout: (
+    lines: CheckoutLine[],
+    operator: string,
+    credit?: CreditOptions,
+  ) => Promise<CheckoutResult>
   /** 退货登记：库存加回最近批次，流水记 type='return'，refundPrice 为退款金额（分）；
-   * customerId 仅在原流水是赊账销售时传（后端会冲减该客户欠款） */
+   * customerId 仅在原流水是赊账销售时传（后端会冲减该客户欠款）；
+   * payMethod=退款方式（可选），只有真退钱（不传 customerId）才落库 */
   addReturn: (
     productId: number,
     quantity: number,
     refundPrice: number | null,
     operator: string,
     customerId?: number | null,
+    payMethod?: PaymentMethod | null,
   ) => Promise<void>
   /** 换货登记：先退旧货再出新货（FIFO），sellingPrice 为新货售价（分）；新货库存不足返回 shortage。
    * opts.customerId=换货客户（差价赊账必传）；opts.diffPaidAmount=差价实收（分），省略=差价全额付清 */
@@ -235,6 +270,11 @@ interface AppState {
   }) => Promise<{ outstanding: number; overpaid: boolean; prepaid: boolean }>
   /** 客户对账单：赊销明细 + 还款记录 + 汇总 */
   customerStatement: (customerId: number) => Promise<CustomerStatement>
+
+  /** 支出记账：记/改/删；amount 单位分，成功失败都抛 Error 给页面提示 */
+  addExpense: (input: ExpenseInput) => Promise<Expense>
+  updateExpense: (id: number, input: ExpenseInput) => Promise<void>
+  deleteExpense: (id: number) => Promise<void>
 
   /** 拉取操作日志（audit:list，最近 200 条，可按 action 筛选）；mock 路径本地已有全量，无需拉取 */
   loadAuditLogs: (action?: string) => Promise<void>
@@ -340,6 +380,45 @@ function genSkuCode(products: Product[], input: NewProductInput): string {
   return String(n)
 }
 
+/** mock 路径的支出构建：与后端 normalizeExpense 同口径校验（生产环境以后端为准） */
+function buildMockExpense(
+  s: { expenses: Expense[]; suppliers: Supplier[] },
+  input: ExpenseInput,
+  id: number,
+  createdAt?: string,
+): Expense {
+  if (!EXPENSE_CATEGORIES.includes(input.category)) {
+    throw new Error(`支出分类必须是：${EXPENSE_CATEGORIES.join(' / ')}`)
+  }
+  if (!Number.isInteger(input.amount) || input.amount <= 0) {
+    throw new Error(`支出金额必须是正整数（单位：分），收到：${input.amount}`)
+  }
+  const method = input.method ?? '现金'
+  if (!PAYMENT_METHODS.includes(method)) {
+    throw new Error(`付款方式必须是：${PAYMENT_METHODS.join(' / ')}`)
+  }
+  const date = input.expenseDate ?? new Date().toLocaleDateString('en-CA')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`支出日期必须是 YYYY-MM-DD 格式，收到：${input.expenseDate}`)
+  }
+  const supplierId = input.supplierId ?? null
+  if (supplierId != null && !s.suppliers.some((x) => x.id === supplierId)) {
+    throw new Error('供应商不存在')
+  }
+  return {
+    id,
+    category: input.category,
+    amount: input.amount,
+    method,
+    supplier_id: supplierId,
+    supplier_name: s.suppliers.find((x) => x.id === supplierId)?.name ?? null,
+    note: input.note?.trim() || null,
+    expense_date: date,
+    operator: null,
+    created_at: createdAt ?? new Date().toISOString(),
+  }
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   soundEnabled: readStorage(LS_SOUND) !== 'off',
   fontSizeMode: readStorage(LS_FONT_SIZE) === 'large' ? 'large' : 'normal',
@@ -364,6 +443,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   purchaseOrders: [],
   purchaseOrderItems: [],
   priceTiers: [],
+  expenses: [],
   auditLogs: [],
   loaded: false,
   error: null,
@@ -461,6 +541,87 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((st) => ({ products: st.products.filter((p) => p.id !== id) }))
   },
 
+  batchUpdateProducts: async ({ ids, priceMode, status, operator }) => {
+    if (backend) {
+      const r = await backend.invoke('product:batchUpdate', { ids, priceMode, status, operator })
+      await get().loadAll()
+      return r
+    }
+    // mock 路径与后端 batchUpdateProducts 同逻辑（生产环境以后端为准）
+    if (!Array.isArray(ids) || ids.length === 0) throw new Error('批量修改的商品列表不能为空')
+    if (priceMode == null && status == null) throw new Error('批量修改至少要做一件事（改价或改状态）')
+    if (priceMode != null) {
+      if (priceMode.kind === 'ratio') {
+        if (!Number.isFinite(priceMode.ratio) || priceMode.ratio <= 0) {
+          throw new Error('折扣必须是大于 0 的数字（如 0.9 表示 9 折）')
+        }
+      } else if (priceMode.kind === 'fixed') {
+        if (!Number.isInteger(priceMode.priceFen) || priceMode.priceFen <= 0) {
+          throw new Error('统一售价必须是大于 0 的整数（单位：分）')
+        }
+      } else {
+        throw new Error('批量改价方式必须是 ratio（打折）或 fixed（统一价）')
+      }
+    }
+    if (status != null && !PRODUCT_STATUSES.includes(status)) throw new Error(`状态非法：${status}`)
+    const state = get()
+    for (const id of ids) {
+      if (!state.products.some((p) => p.id === id)) throw new Error(`商品不存在（ID：${id}）`)
+    }
+    const idSet = new Set(ids)
+    const now = new Date().toISOString()
+    const convert = (p: number) =>
+      priceMode!.kind === 'ratio' ? Math.max(1, Math.round(p * (priceMode as { kind: 'ratio'; ratio: number }).ratio)) : (priceMode as { kind: 'fixed'; priceFen: number }).priceFen
+    const tiersUpdated = priceMode ? state.priceTiers.filter((t) => idSet.has(t.product_id)).length : 0
+    // mock 路径顺手记操作日志（生产环境以后端 audit_log 表为准）
+    const newLogs: AuditLogEntry[] = []
+    let logId = nextId(state.auditLogs)
+    if (priceMode) {
+      newLogs.push({
+        id: logId++,
+        action: '批量改价',
+        entity: `批量改价 ${ids.length} 个商品`,
+        detail: JSON.stringify({
+          count: ids.length,
+          mode: priceMode.kind,
+          ratio: priceMode.kind === 'ratio' ? priceMode.ratio : null,
+          priceFen: priceMode.kind === 'fixed' ? priceMode.priceFen : null,
+          tiersUpdated,
+        }),
+        operator: operator ?? null,
+        created_at: now,
+      })
+    }
+    if (status) {
+      newLogs.push({
+        id: logId++,
+        action: '批量改状态',
+        entity: `批量改状态 ${ids.length} 个商品 → ${status}`,
+        detail: JSON.stringify({ count: ids.length, status }),
+        operator: operator ?? null,
+        created_at: now,
+      })
+    }
+    set((s) => ({
+      products: s.products.map((p) => {
+        if (!idSet.has(p.id)) return p
+        return {
+          ...p,
+          suggest_price:
+            priceMode && p.suggest_price != null ? convert(p.suggest_price) : p.suggest_price,
+          status: status ?? p.status,
+          updated_at: now,
+        }
+      }),
+      // 只动"已设"的档次价；没设档的商品不补建（与后端同口径）
+      priceTiers: priceMode
+        ? s.priceTiers.map((t) => (idSet.has(t.product_id) ? { ...t, price: convert(t.price) } : t))
+        : s.priceTiers,
+      auditLogs: [...newLogs, ...s.auditLogs],
+    }))
+    return { ok: true as const, updated: ids.length, tiersUpdated }
+  },
+
   addInbound: async ({ productId, quantity, costPrice, location, supplierId, operator }) => {
     if (backend) {
       await backend.invoke('inbound:create', { productId, quantity, costPrice, location, supplierId, operator })
@@ -519,6 +680,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         customerId: credit?.customerId ?? null,
         paidAmount: credit?.paidAmount ?? null,
         tier: credit?.tier ?? null,
+        payMethod: credit?.payMethod ?? null,
       })
       if (result.ok) {
         await get().loadAll()
@@ -545,6 +707,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (paidAmount < totalDue && credit?.customerId == null) throw new Error('赊账必须选客户')
     }
     const isCredit = totalDue != null && paidAmount != null && paidAmount < totalDue
+    // 纯赊账没有现金移动，到账方式强制落空（与后端口径一致）
+    const methodForTx = isCredit && paidAmount === 0 ? null : (credit?.payMethod ?? null)
 
     let txId = nextId(state.transactions)
     const now = new Date().toISOString()
@@ -567,6 +731,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         notes: null,
         customer_id: credit?.customerId ?? null,
         paid_amount: linePaid,
+        pay_method: methodForTx,
       }
     })
     const deductBy = new Map(plan.allocations.map((a) => [a.batch_id, a.remaining_after]))
@@ -600,9 +765,120 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { ok: true, allocations: plan.allocations }
   },
 
-  addReturn: async (productId, quantity, refundPrice, operator, customerId) => {
+  checkout: async (lines, operator, credit) => {
     if (backend) {
-      await backend.invoke('outbound:return', { productId, quantity, refundPrice, operator, customerId: customerId ?? null })
+      const result = (await backend.invoke('outbound:checkout', {
+        items: lines,
+        operator,
+        customerId: credit?.customerId ?? null,
+        paidAmount: credit?.paidAmount ?? null,
+        payMethod: credit?.payMethod ?? null,
+      })) as CheckoutResult
+      if (result.ok) {
+        await get().loadAll()
+        if (credit?.customerId != null) await get().loadCustomers()
+      }
+      return result
+    }
+    // mock 路径与后端 confirmCheckout 同口径：先全部试算 FIFO，任一行缺货整单不动
+    const state = get()
+    const totalDue = lines.reduce((s, l) => s + l.quantity * l.sellingPrice, 0)
+    const paidAmount = credit?.paidAmount ?? null
+    if (paidAmount != null) {
+      if (paidAmount > totalDue) throw new Error('实收金额不能超过应付总额')
+      if (paidAmount < totalDue && credit?.customerId == null) throw new Error('赊账必须选客户')
+    }
+    const plans: { line: CheckoutLine; allocations: FifoAllocation[] }[] = []
+    const shortages: { productId: number; name: string; shortage: number }[] = []
+    for (const l of lines) {
+      const plan = computeFifoPlan(state.batchesOf(l.productId), l.quantity)
+      if (!plan.ok) {
+        const prod = state.products.find((p) => p.id === l.productId)
+        shortages.push({
+          productId: l.productId,
+          name: productName(prod ?? { brand: null, model: null, sku_code: `#${l.productId}` }),
+          shortage: plan.shortage,
+        })
+        continue
+      }
+      plans.push({ line: l, allocations: plan.allocations })
+    }
+    if (shortages.length > 0) return { ok: false, shortages }
+    const isCredit = paidAmount != null && paidAmount < totalDue
+    // 纯赊账没有现金移动，到账方式强制落空（与后端口径一致）
+    const methodForTx = isCredit && paidAmount === 0 ? null : (credit?.payMethod ?? null)
+    let paidLeft = isCredit ? paidAmount! : 0
+    let txId = nextId(state.transactions)
+    const now = new Date().toISOString()
+    const newTxs: Transaction[] = []
+    const deductBy = new Map<number, number>()
+    for (const { line: l, allocations } of plans) {
+      for (const a of allocations) {
+        // 实收按行顺序 + 行内 FIFO 摊销；非赊账单 paid_amount 保持 null=全额付清
+        const lineDue = a.deduct * l.sellingPrice
+        const linePaid = isCredit ? Math.min(paidLeft, lineDue) : null
+        if (linePaid !== null) paidLeft -= linePaid
+        newTxs.push({
+          id: txId++,
+          product_id: l.productId,
+          batch_id: a.batch_id,
+          type: 'out',
+          quantity: a.deduct,
+          unit_price: a.cost_price,
+          selling_price: l.sellingPrice,
+          timestamp: now,
+          operator,
+          notes: null,
+          customer_id: credit?.customerId ?? null,
+          paid_amount: linePaid,
+          pay_method: methodForTx,
+        })
+        deductBy.set(a.batch_id, a.remaining_after)
+      }
+    }
+    const transactions = [...newTxs].reverse().concat(state.transactions)
+    const names = lines
+      .map((l) => {
+        const prod = state.products.find((p) => p.id === l.productId)
+        return `${productName(prod ?? { brand: null, model: null, sku_code: `#${l.productId}` })} x${l.quantity}`
+      })
+      .join('，')
+    const audit: AuditLogEntry = {
+      id: nextId(state.auditLogs),
+      action: '收银开单',
+      entity: `${lines.length} 种商品：${names}`,
+      detail: JSON.stringify({
+        itemCount: lines.length,
+        totalDue,
+        paidAmount: isCredit ? paidAmount : null,
+        creditAmount: isCredit ? totalDue - paidAmount! : 0,
+      }),
+      operator,
+      created_at: now,
+    }
+    set((s) => ({
+      batches: s.batches.map((b) =>
+        deductBy.has(b.id) ? { ...b, quantity: deductBy.get(b.id)! } : b,
+      ),
+      transactions,
+      auditLogs: [audit, ...s.auditLogs],
+      customers:
+        credit?.customerId != null
+          ? computeCustomerStats(s.customers, transactions, s.payments)
+          : s.customers,
+    }))
+    return {
+      ok: true,
+      lines: [],
+      totalDue,
+      paidAmount: isCredit ? paidAmount : null,
+      creditAmount: isCredit ? totalDue - paidAmount! : 0,
+    }
+  },
+
+  addReturn: async (productId, quantity, refundPrice, operator, customerId, payMethod) => {
+    if (backend) {
+      await backend.invoke('outbound:return', { productId, quantity, refundPrice, operator, customerId: customerId ?? null, payMethod: payMethod ?? null })
       await get().loadAll()
       // 赊账销售的退货会冲减客户欠款，单独刷新客户列表
       if (customerId != null) await get().loadCustomers()
@@ -654,6 +930,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       notes: '退货回补',
       customer_id: customerId ?? null,
       paid_amount: null,
+      // 冲减欠款的退货没有现金移动，退款方式强制落空（与后端口径一致）
+      pay_method: customerId == null ? (payMethod ?? null) : null,
     }
     set((s) => ({
       batches: newBatches,
@@ -1173,6 +1451,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { outstanding, overpaid: amount > Math.max(cust.outstanding, 0), prepaid: outstanding < 0 }
   },
 
+  // 支出记账（mock 路径与后端 normalizeExpense 同口径校验，生产环境以后端为准）
+  addExpense: async (input) => {
+    if (backend) {
+      const row = await backend.invoke('expense:create', input)
+      await get().loadAll()
+      return row as Expense
+    }
+    const expense = buildMockExpense(get(), input, nextId(get().expenses))
+    set({ expenses: [expense, ...get().expenses] })
+    return expense
+  },
+
+  updateExpense: async (id, input) => {
+    if (backend) {
+      await backend.invoke('expense:update', { id, ...input })
+      await get().loadAll()
+      return
+    }
+    const s = get()
+    if (!s.expenses.some((e) => e.id === id)) throw new Error('支出记录不存在或已被删除')
+    const updated = buildMockExpense(s, input, id, s.expenses.find((e) => e.id === id)?.created_at)
+    set({ expenses: s.expenses.map((e) => (e.id === id ? updated : e)) })
+  },
+
+  deleteExpense: async (id) => {
+    if (backend) {
+      await backend.invoke('expense:delete', { id })
+      await get().loadAll()
+      return
+    }
+    const s = get()
+    if (!s.expenses.some((e) => e.id === id)) throw new Error('支出记录不存在或已被删除')
+    set({ expenses: s.expenses.filter((e) => e.id !== id) })
+  },
+
   customerStatement: async (customerId) => {
     if (backend) return backend.invoke('customer:statement', { customerId })
     // mock 回退路径本地拼对账单（口径参照后端 customerStatement；生产环境以后端为准）
@@ -1400,3 +1713,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 }))
+
+// 开发调试钩子：浏览器 mock 路径下把 store 挂到 window，截图脚本/控制台可直接改状态
+// （import.meta.env.DEV 仅 vite dev 为真，生产构建不含）
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  ;(window as unknown as { __fiStore?: typeof useAppStore }).__fiStore = useAppStore
+}

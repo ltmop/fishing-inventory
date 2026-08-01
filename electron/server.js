@@ -9,7 +9,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
-import { confirmOutbound, listCustomers, lowStockProducts, auditLog, supplierStatement } from './commands.js'
+import { confirmOutbound, listCustomers, lowStockProducts, auditLog, supplierStatement, todayPaymentSplit } from './commands.js'
+import * as cmds from './commands.js'
+import { createPhotoStore } from './photo.js'
 
 const DEFAULT_PORT = 17532
 const MAX_PORT_RETRY = 10
@@ -17,6 +19,27 @@ const RATE_LIMIT_PER_MIN = 120
 // 写接口独立限流（更严）与请求体上限
 const WRITE_RATE_LIMIT_PER_MIN = 30
 const MAX_BODY_BYTES = 8192
+// 通用调用接口（/api/invoke）请求体上限：批量导入/商品图片 base64 会到几百 KB
+const MAX_INVOKE_BODY = 2 * 1024 * 1024
+
+// 桌面网页版（/app）静态资源 MIME
+const STATIC_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
+// /app 的 CSP 比手机页放宽：要加载自己的 js/css 文件，图片允许 data/blob（拍照预览）
+const APP_CSP =
+  "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:"
 
 // ---------- 统计查询（口径参照 DashboardPage：金额单位分，退货冲减营业额/毛利） ----------
 
@@ -74,6 +97,7 @@ function querySummary(db) {
     totalStock: stock.q,
     stockValue: stock.v,
     lowStockCount,
+    payments: todayPaymentSplit(db),
   }
 }
 
@@ -96,9 +120,9 @@ function queryInventory(db, q) {
   const tierStmt = db.prepare('SELECT tier, price FROM price_tiers WHERE product_id = ?')
   return db
     .prepare(
-      `SELECT p.id, p.brand, p.model, p.sku_code, p.location, p.cost_price, p.suggest_price,
+      `SELECT p.id, p.brand, p.model, p.sku_code, p.barcode, p.location, p.cost_price, p.suggest_price,
               p.rod_length, p.rod_action, p.power_rating, p.line_number,
-              p.hook_size, p.color, p.material, p.expiry_date,
+              p.hook_size, p.color, p.material, p.expiry_date, p.photo_path,
               COALESCE(s.q, 0) AS stock
        FROM products p
        LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
@@ -113,6 +137,7 @@ function queryInventory(db, q) {
       id: r.id,
       name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
       sku: r.sku_code,
+      barcode: r.barcode ?? null,
       stock: r.stock,
       costPrice: r.cost_price,
       suggestPrice: r.suggest_price ?? null,
@@ -132,6 +157,8 @@ function queryInventory(db, q) {
         ].filter(([, v]) => v != null && v !== ''),
       ),
       location: r.location,
+      // 商品图片相对文件名（images 目录内），手机页经 /api/photo?path= 取图；没图为 null
+      photoPath: r.photo_path ?? null,
     }))
 }
 
@@ -226,7 +253,7 @@ const MOBILE_PAGE = `<!DOCTYPE html>
   .pay-btns { display: flex; gap: 10px; }
   .pay { flex: 1; font-size: 18px; font-weight: 700; padding: 13px 0; border-radius: 10px; border: 2px solid #1d4ed8; background: #fff; color: #1d4ed8; }
   .pay.active { background: #1d4ed8; color: #fff; }
-  .sell-prod { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(30,58,95,.06); }
+  .sell-prod { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(30,58,95,.06); display: flex; align-items: center; }
   .sell-prod .name { font-size: 18px; font-weight: 700; }
   .sell-prod .meta { font-size: 13px; color: #94a3b8; margin-top: 4px; font-family: monospace; }
   .big-submit { width: 100%; font-size: 22px; font-weight: 800; padding: 17px 0; border: none; border-radius: 14px; background: #15803d; color: #fff; }
@@ -253,6 +280,7 @@ const MOBILE_PAGE = `<!DOCTYPE html>
   <div class="card"><div class="label">今日入库</div><div class="value" id="v-in">-</div></div>
   <div class="card"><div class="label">今日出库</div><div class="value" id="v-out">-</div></div>
 </div>
+<div class="meta" id="v-paysplit" style="margin:4px 2px 10px"></div>
 
 <div class="section">
   <h2>低库存预警</h2>
@@ -280,9 +308,11 @@ const MOBILE_PAGE = `<!DOCTYPE html>
 
 <div class="section" id="sell-form" style="display:none">
   <h2>2. 开单</h2>
-  <div class="sell-prod">
-    <div class="name" id="sell-name"></div>
-    <div class="meta" id="sell-meta"></div>
+  <div class="sell-prod" id="sell-prod">
+    <div>
+      <div class="name" id="sell-name"></div>
+      <div class="meta" id="sell-meta"></div>
+    </div>
   </div>
   <div class="field">
     <label>数量</label>
@@ -303,6 +333,15 @@ const MOBILE_PAGE = `<!DOCTYPE html>
       <button class="pay" id="pay-credit" type="button">欠款记账</button>
     </div>
   </div>
+  <div class="field">
+    <label>到账方式</label>
+    <select id="sell-method">
+      <option value="现金" selected>现金</option>
+      <option value="微信">微信</option>
+      <option value="支付宝">支付宝</option>
+      <option value="其他">其他</option>
+    </select>
+  </div>
   <div id="credit-box" style="display:none">
     <div class="field">
       <label>客户（欠款必须选人）</label>
@@ -319,7 +358,10 @@ const MOBILE_PAGE = `<!DOCTYPE html>
 </div>
 
 <script>
-var token = new URLSearchParams(location.search).get('token') || '';
+var pageParams = new URLSearchParams(location.search);
+var token = pageParams.get('token') || '';
+// 扫码直达开单：商品贴纸二维码带 &barcode= 参数，打开页面自动锁定该商品进入开单
+var deepBarcode = (pageParams.get('barcode') || '').trim();
 function api(path) {
   var sep = path.indexOf('?') >= 0 ? '&' : '?';
   return fetch(path + sep + 'token=' + encodeURIComponent(token)).then(function (r) {
@@ -342,6 +384,17 @@ function addRow(box, name, meta, numHtml) {
   var right = document.createElement('div'); right.className = 'num'; right.innerHTML = numHtml;
   row.appendChild(left); row.appendChild(right);
   box.appendChild(row);
+  return row;
+}
+
+// 商品缩略图：经 /api/photo 取图（带 token）；文件不在就隐藏 img，行照常用
+function photoImg(photoPath, size) {
+  var img = document.createElement('img');
+  img.src = '/api/photo?path=' + encodeURIComponent(photoPath) + '&token=' + encodeURIComponent(token);
+  img.alt = '';
+  img.style.cssText = 'width:' + size + 'px;height:' + size + 'px;object-fit:cover;border-radius:8px;margin-right:10px;flex:none;background:#e2e8f0';
+  img.onerror = function () { img.style.display = 'none'; };
+  return img;
 }
 
 function loadSummary() {
@@ -350,6 +403,16 @@ function loadSummary() {
     document.getElementById('v-profit').textContent = yuan(s.todayProfit);
     document.getElementById('v-in').textContent = '+' + s.todayInQty;
     document.getElementById('v-out').textContent = '-' + s.todayOutQty;
+    // 收款方式拆分：现金/微信/支付宝/其他 + 未记录 + 今日新增赊账（日结对账一眼对上）
+    if (s.payments) {
+      var parts = [];
+      ['现金', '微信', '支付宝', '其他'].forEach(function (m) {
+        if (s.payments.byMethod[m]) parts.push(m + ' ' + yuan(s.payments.byMethod[m]));
+      });
+      if (s.payments.unrecorded) parts.push('未记录 ' + yuan(s.payments.unrecorded));
+      if (s.payments.credit) parts.push('新增赊账 ' + yuan(s.payments.credit));
+      document.getElementById('v-paysplit').textContent = parts.length ? '今日到账：' + parts.join(' · ') : '';
+    }
     document.getElementById('updated').textContent =
       '库存 ' + s.totalStock + ' 件 · 库存总值 ' + yuan(s.stockValue) + ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
   }).catch(showErr);
@@ -394,9 +457,10 @@ document.getElementById('q').addEventListener('input', function (e) {
       box.innerHTML = '';
       if (!items.length) { box.innerHTML = '<div class="empty">没搜到，换个关键词试试</div>'; return; }
       items.forEach(function (it) {
-        addRow(box, it.name, it.sku + ' · ' + yuan(it.costPrice),
+        var row = addRow(box, it.name, it.sku + ' · ' + yuan(it.costPrice),
           '<span class="' + (it.stock < 5 ? 'red' : 'blue') + '">' + it.stock + ' 件</span>' +
           (it.location ? '<div class="time">' + esc(it.location) + '</div>' : ''));
+        if (it.photoPath) row.insertBefore(photoImg(it.photoPath, 48), row.firstChild);
       });
     }).catch(showErr);
   }, 300);
@@ -431,29 +495,42 @@ document.getElementById('sell-q').addEventListener('input', function (e) {
   clearTimeout(sellSearchTimer);
   var q = e.target.value.trim();
   if (!q) { document.getElementById('sell-result').innerHTML = ''; return; }
-  sellSearchTimer = setTimeout(function () {
-    api('/api/inventory?q=' + encodeURIComponent(q)).then(function (items) {
-      var box = document.getElementById('sell-result');
-      box.innerHTML = '';
-      if (!items.length) { box.innerHTML = '<div class="empty">没搜到，换个关键词试试</div>'; return; }
-      items.forEach(function (it) {
-        var row = document.createElement('div');
-        row.className = 'row pickable';
-        var left = document.createElement('div');
-        var n = document.createElement('div'); n.className = 'name'; n.textContent = it.name;
-        var m = document.createElement('div'); m.className = 'meta';
-        m.textContent = it.sku + (specText(it.specs) ? ' · ' + specText(it.specs) : '');
-        left.appendChild(n); left.appendChild(m);
-        var right = document.createElement('div'); right.className = 'num';
-        right.innerHTML = '<span class="' + (it.stock < 5 ? 'red' : 'blue') + '">' + it.stock + ' 件</span>' +
-          '<div class="time">' + yuan(it.suggestPrice) + '</div>';
-        row.appendChild(left); row.appendChild(right);
-        row.addEventListener('click', function () { selectSell(it); });
-        box.appendChild(row);
-      });
-    }).catch(showErr);
-  }, 300);
+  sellSearchTimer = setTimeout(function () { doSellSearch(q, false); }, 300);
 });
+
+function doSellSearch(q, autoPick) {
+  api('/api/inventory?q=' + encodeURIComponent(q)).then(function (items) {
+    var box = document.getElementById('sell-result');
+    box.innerHTML = '';
+    if (!items.length) { box.innerHTML = '<div class="empty">没搜到，换个关键词试试</div>'; return; }
+    items.forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'row pickable';
+      var left = document.createElement('div');
+      var n = document.createElement('div'); n.className = 'name'; n.textContent = it.name;
+      var m = document.createElement('div'); m.className = 'meta';
+      m.textContent = it.sku + (specText(it.specs) ? ' · ' + specText(it.specs) : '');
+      left.appendChild(n); left.appendChild(m);
+      var right = document.createElement('div'); right.className = 'num';
+      right.innerHTML = '<span class="' + (it.stock < 5 ? 'red' : 'blue') + '">' + it.stock + ' 件</span>' +
+        '<div class="time">' + yuan(it.suggestPrice) + '</div>';
+      row.appendChild(left); row.appendChild(right);
+      if (it.photoPath) row.insertBefore(photoImg(it.photoPath, 48), row.firstChild);
+      row.addEventListener('click', function () { selectSell(it); });
+      box.appendChild(row);
+    });
+    // 扫码直达：唯一结果或条码/SKU 精确命中 → 直接锁定进入开单，不用再点一次
+    if (autoPick) {
+      var hit = items.length === 1 ? items[0] : null;
+      if (!hit) {
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].sku === q || items[i].barcode === q) { hit = items[i]; break; }
+        }
+      }
+      if (hit) selectSell(hit);
+    }
+  }).catch(showErr);
+}
 
 function selectSell(it) {
   sellState.prod = it;
@@ -462,6 +539,11 @@ function selectSell(it) {
   document.getElementById('sell-name').textContent = it.name;
   document.getElementById('sell-meta').textContent =
     it.sku + ' · 库存 ' + it.stock + ' 件' + (specText(it.specs) ? ' · ' + specText(it.specs) : '');
+  // 选中的商品带张大一点的图，认图不认字
+  var sp = document.getElementById('sell-prod');
+  var oldImg = sp.querySelector('img');
+  if (oldImg) oldImg.remove();
+  if (it.photoPath) sp.insertBefore(photoImg(it.photoPath, 56), sp.firstChild);
   document.getElementById('sell-price').value = it.suggestPrice != null ? (it.suggestPrice / 100).toFixed(2) : '';
   applyTierPrice();
   document.getElementById('sell-form').style.display = '';
@@ -539,6 +621,7 @@ sellBtn.addEventListener('click', function () {
   var price = parseYuan(document.getElementById('sell-price').value, '单价');
   if (price == null) return;
   var body = { productId: prod.id, quantity: sellState.qty, sellingPrice: price };
+  body.payMethod = document.getElementById('sell-method').value;
   if (sellState.payMode === 'credit') {
     var cid = parseInt(document.getElementById('sell-cust').value, 10);
     if (!cid) { showErr(new Error('欠款记账必须选择客户')); return; }
@@ -577,6 +660,13 @@ sellBtn.addEventListener('click', function () {
 function loadAll() { loadSummary(); loadLowStock(); loadToday(); }
 loadAll();
 setInterval(loadAll, 30000);
+
+// 扫码直达开单：贴纸二维码打开时自动切到卖货页并锁定商品
+if (deepBarcode) {
+  showTab('sell');
+  document.getElementById('sell-q').value = deepBarcode;
+  doSellSearch(deepBarcode, true);
+}
 </script>
 </body>
 </html>`
@@ -588,9 +678,11 @@ setInterval(loadAll, 30000);
  * @param {{ db: import('node:sqlite').DatabaseSync, dataDir: string, basePort?: number }} opts
  *   db 注入业务库连接（照 commands.js 模式）；dataDir 用于存 token 与开关配置
  */
-export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) {
+export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, webRoot = null }) {
   const tokenPath = path.join(dataDir, 'server-token.txt')
   const configPath = path.join(dataDir, 'server-config.json')
+  // 商品图片只读出口：/api/photo?path=<相对文件名>，路径校验与桌面端 fi-img 协议共用 photo.js
+  const photoStore = createPhotoStore(path.join(dataDir, 'images'))
   let server = null
   let port = null
   let token = null
@@ -710,7 +802,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
     'Content-Security-Policy':
-      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'",
   }
 
   function sendJson(res, code, data) {
@@ -735,7 +827,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
    * 校验链：写限流 → token → Content-Type → 8KB 上限 → JSON → 字段白名单/类型 →
    * 业务校验与桌面端共用 commands.confirmOutbound（错误信息原样返回）。
    */
-  const OUTBOUND_FIELDS = ['productId', 'quantity', 'sellingPrice', 'customerId', 'paidAmount']
+  const OUTBOUND_FIELDS = ['productId', 'quantity', 'sellingPrice', 'customerId', 'paidAmount', 'payMethod']
   async function handleOutbound(req, res, url) {
     if (writeRateLimited(req.socket.remoteAddress ?? 'unknown')) {
       sendJson(res, 429, { error: 'too many requests' })
@@ -795,6 +887,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
         sellingPrice,
         customerId: body.customerId ?? null,
         paidAmount: body.paidAmount ?? null,
+        payMethod: body.payMethod ?? null,
         operator: '手机开单',
       })
       if (!r.ok) {
@@ -813,26 +906,183 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
     }
   }
 
+  // ---------- 局域网整机共享（方案 A）：桌面网页版托管 + 通用调用接口 ----------
+
+  // 通用调用白名单：把桌面端 IPC 数据/业务通道镜像成 HTTP 接口（同一套 commands 业务校验）。
+  // 语音/模型下载/系统对话框/本机备份恢复/AI 等主机本地能力不开放给局域网。
+  const INVOKE_CHANNELS = {
+    'data:loadAll': (d, p) => cmds.loadAll(d),
+    'product:create': (d, p) => cmds.createProduct(d, p),
+    'product:update': (d, p) => cmds.updateProduct(d, p.id, p),
+    'product:batchUpdate': (d, p) => cmds.batchUpdateProducts(d, p),
+    'product:delete': (d, p) => cmds.deleteProduct(d, p.id, p.operator ?? null),
+    'product:expiring': (d, p) => cmds.expiringProducts(d, p),
+    'inbound:create': (d, p) => cmds.createInbound(d, p),
+    'outbound:confirm': (d, p) => cmds.confirmOutbound(d, p),
+    'outbound:checkout': (d, p) => cmds.confirmCheckout(d, p),
+    'outbound:return': (d, p) => cmds.createReturn(d, p),
+    'outbound:exchange': (d, p) => cmds.createExchange(d, p),
+    'supplier:create': (d, p) => cmds.createSupplier(d, p),
+    'supplier:update': (d, p) => cmds.updateSupplier(d, p.id, p),
+    'supplier:delete': (d, p) => cmds.deleteSupplier(d, p.id),
+    'stocktake:create': (d, p) => cmds.createStockTake(d, p),
+    'stocktake:updateItem': (d, p) => cmds.updateStockTakeItem(d, p),
+    'stocktake:complete': (d, p) => cmds.completeStockTake(d, p.takeId),
+    'stocktake:submit': (d, p) => cmds.submitStockTake(d, p),
+    'import:batch': (d, p) => cmds.importBatch(d, p),
+    'customer:create': (d, p) => cmds.createCustomer(d, p),
+    'customer:update': (d, p) => cmds.updateCustomer(d, p),
+    'customer:delete': (d, p) => cmds.deleteCustomer(d, p),
+    'customer:list': (d) => cmds.listCustomers(d),
+    'customer:statement': (d, p) => cmds.customerStatement(d, p),
+    'payment:record': (d, p) => cmds.recordPayment(d, p),
+    'expense:create': (d, p) => cmds.createExpense(d, p),
+    'expense:update': (d, p) => cmds.updateExpense(d, p),
+    'expense:delete': (d, p) => cmds.deleteExpense(d, p),
+    'po:create': (d, p) => cmds.createPurchaseOrder(d, p),
+    'po:list': (d, p) => cmds.listPurchaseOrders(d, p),
+    'po:detail': (d, p) => cmds.purchaseOrderDetail(d, p),
+    'po:receive': (d, p) => cmds.receivePurchaseOrder(d, p),
+    'po:cancel': (d, p) => cmds.cancelPurchaseOrder(d, p),
+    'priceTier:set': (d, p) => cmds.setPriceTier(d, p),
+    'priceTier:delete': (d, p) => cmds.deletePriceTier(d, p),
+    'priceTier:list': (d, p) => cmds.getPriceTiers(d, p),
+    'audit:list': (d, p) => cmds.auditLog(d, p),
+    'supplier:statement': (d, p) => cmds.supplierStatement(d, p),
+    // 商品图片：与桌面端主进程同款——写盘返回相对文件名 / 删文件+清 photo_path
+    'photo:save': (d, p) => ({ ok: true, path: photoStore.save(p?.productId, p?.base64, p?.ext ?? 'jpg') }),
+    'photo:delete': (d, p) => {
+      photoStore.remove(p?.productId)
+      cmds.updateProduct(d, p?.productId, { photo_path: null })
+      return { ok: true }
+    },
+  }
+
+  /** POST /api/invoke：{ channel, payload } → { ok:true, result }；业务错误 400 原样带中文提示 */
+  async function handleInvoke(req, res, url) {
+    if (!tokenOk(tokenOf(req, url))) {
+      sendJson(res, 401, { error: 'unauthorized' })
+      return
+    }
+    const ct = String(req.headers['content-type'] ?? '').toLowerCase()
+    if (!ct.startsWith('application/json')) {
+      sendJson(res, 415, { error: 'Content-Type 必须是 application/json' })
+      return
+    }
+    let raw
+    try {
+      raw = await readBody(req, MAX_INVOKE_BODY)
+    } catch {
+      sendJson(res, 413, { error: '请求体超过 2MB 上限' })
+      return
+    }
+    let body
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      sendJson(res, 400, { error: '请求体不是合法 JSON' })
+      return
+    }
+    const fn = typeof body?.channel === 'string' ? INVOKE_CHANNELS[body.channel] : undefined
+    if (!fn) {
+      sendJson(res, 404, { error: 'unknown channel' })
+      return
+    }
+    try {
+      const result = await fn(db, body.payload ?? {})
+      sendJson(res, 200, { ok: true, result })
+    } catch (e) {
+      // 业务校验错误（中文提示）原样返回，前端 catch 后直接展示
+      sendJson(res, 400, { ok: false, error: e.message })
+    }
+  }
+
+  /** GET /app：托管桌面网页版（dist）。代码公开、数据走 token，与手机页同一威胁模型 */
+  function serveApp(res, pathname) {
+    if (!webRoot) {
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    // HashRouter：前端路由全在 hash 里，/app 一律给 index.html，无 history 回退问题
+    const rel = pathname === '/app' || pathname === '/app/' ? 'index.html' : pathname.slice('/app/'.length)
+    // 防路径穿越：URL 已解码，拒绝 .. 与反斜杠；再用 resolve 双保险
+    if (rel.includes('..') || rel.includes('\\')) {
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    const root = path.resolve(webRoot)
+    const abs = path.resolve(root, rel)
+    if (!abs.startsWith(root + path.sep)) {
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    let data
+    try {
+      data = fs.readFileSync(abs)
+    } catch {
+      sendJson(res, 404, { error: 'not found' })
+      return
+    }
+    const mime = STATIC_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream'
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Security-Policy': APP_CSP, 'Content-Type': mime })
+    res.end(data)
+  }
+
   async function handle(req, res) {
-    // 方法白名单：GET + 唯一的写接口 POST /api/outbound，其余一律 405
+    // 方法白名单：GET + 写接口 POST /api/outbound（手机开单）和 POST /api/invoke（整机共享），其余一律 405
     const url = new URL(req.url ?? '/', 'http://localhost')
-    const isWrite = req.method === 'POST' && url.pathname === '/api/outbound'
-    if (req.method !== 'GET' && !isWrite) {
+    const isOutbound = req.method === 'POST' && url.pathname === '/api/outbound'
+    const isInvoke = req.method === 'POST' && url.pathname === '/api/invoke'
+    if (req.method !== 'GET' && !isOutbound && !isInvoke) {
       sendJson(res, 405, { error: 'method not allowed' })
       return
     }
-    if (rateLimited(req.socket.remoteAddress ?? 'unknown')) {
+    // /api/photo 不计速率限制：一页搜索结果可能带几十张缩略图，计入 120 次/分钟会把看店页刷崩
+    // （token 鉴权照常在下面做，timingSafeEqual 防爆破不受影响）
+    if (url.pathname !== '/api/photo' && rateLimited(req.socket.remoteAddress ?? 'unknown')) {
       sendJson(res, 429, { error: 'too many requests' })
       return
     }
-    if (isWrite) {
+    if (isOutbound) {
       await handleOutbound(req, res, url)
+      return
+    }
+    if (isInvoke) {
+      // 通用调用计入常规限流（120 次/分钟）：收银高频操作不被写接口的 30 次卡住，token 鉴权是真正的闸
+      await handleInvoke(req, res, url)
       return
     }
     // 路径严格白名单：URL 解析后精确匹配，不存在路径穿越问题
     if (url.pathname === '/') {
       res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8' })
       res.end(MOBILE_PAGE)
+      return
+    }
+    // 桌面网页版（整机共享）：其他电脑/平板浏览器打开用全功能系统
+    if (url.pathname === '/app' || url.pathname.startsWith('/app/')) {
+      serveApp(res, url.pathname)
+      return
+    }
+    // 商品图片（二进制端点，不走下面的 JSON 路由表）：token 鉴权 + resolvePath 防路径穿越，
+    // 只放行 images 目录内 <数字>.<jpg/png/webp> 文件，找不到 404
+    if (url.pathname === '/api/photo') {
+      if (!tokenOk(tokenOf(req, url))) {
+        sendJson(res, 401, { error: 'unauthorized' })
+        return
+      }
+      const abs = photoStore.resolvePath(url.searchParams.get('path'))
+      if (!abs || !fs.existsSync(abs)) {
+        sendJson(res, 404, { error: 'not found' })
+        return
+      }
+      const ext = path.extname(abs).slice(1).toLowerCase()
+      res.writeHead(200, {
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Type':
+          ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg',
+        'Cache-Control': 'private, max-age=3600',
+      })
+      fs.createReadStream(abs).pipe(res)
       return
     }
     const ROUTES = {
@@ -933,6 +1183,8 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT }) 
       port: running ? port : null,
       ip: lanIp(),
       url: running ? `http://${lanIp()}:${port}/?token=${token}` : null,
+      // 整机共享：其他电脑/平板浏览器用这个网址开全功能系统
+      appUrl: running && webRoot ? `http://${lanIp()}:${port}/app?token=${token}` : null,
       error: lastError,
     }
   }

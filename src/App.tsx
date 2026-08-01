@@ -11,6 +11,7 @@ import { StockTakePage } from '@/pages/StockTakePage'
 import { PurchasePage } from '@/pages/PurchasePage'
 import { SuppliersPage } from '@/pages/SuppliersPage'
 import { CustomersPage } from '@/pages/CustomersPage'
+import { ExpensesPage } from '@/pages/ExpensesPage'
 import { AuditLogPage } from '@/pages/AuditLogPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ImportPage } from '@/pages/ImportPage'
@@ -22,6 +23,7 @@ import {
   mockAuditLogs,
   mockBatches,
   mockCustomers,
+  mockExpenses,
   mockPayments,
   mockPriceTiers,
   mockProducts,
@@ -62,6 +64,7 @@ function App() {
         purchaseOrders: mockPurchaseOrders,
         purchaseOrderItems: mockPurchaseOrderItems,
         priceTiers: mockPriceTiers,
+        expenses: mockExpenses,
         auditLogs: mockAuditLogs,
         loaded: true,
       })
@@ -94,6 +97,7 @@ function App() {
             <Route path="purchase" element={<PurchasePage />} />
             <Route path="suppliers" element={<SuppliersPage />} />
             <Route path="customers" element={<CustomersPage />} />
+            <Route path="expenses" element={<ExpensesPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="import" element={<ImportPage />} />
             <Route path="settings" element={<SettingsPage />} />

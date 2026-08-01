@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { Loader2, ScrollText } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { formatDateTime, formatPrice } from '@/lib/formatters'
+import { usePagination } from '@/lib/usePagination'
 import { PRICE_LEVEL_LABELS, type AuditLogEntry, type PriceLevel } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
+import { Pagination } from '@/components/ui/pagination'
 import {
   Select,
   SelectContent,
@@ -147,6 +149,9 @@ export function AuditLogPage() {
     [auditLogs, action],
   )
 
+  // 分页切在筛选之后；换操作类型筛选时回第 1 页
+  const pg = usePagination(rows, [rows])
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -188,32 +193,35 @@ export function AuditLogPage() {
                 : `最近没有「${action}」的记录`}
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-32">时间</TableHead>
-                  <TableHead className="w-24">操作</TableHead>
-                  <TableHead>内容</TableHead>
-                  <TableHead className="w-28">操作员</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((e) => (
-                  <TableRow key={e.id}>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">
-                      {formatDateTime(e.created_at)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge className={ACTION_BADGE_CLASS[e.action] ?? 'bg-slate-100 text-slate-600'}>
-                        {e.action}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>{describeEntry(e)}</TableCell>
-                    <TableCell>{e.operator ?? '-'}</TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-32">时间</TableHead>
+                    <TableHead className="w-24">操作</TableHead>
+                    <TableHead>内容</TableHead>
+                    <TableHead className="w-28">操作员</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {pg.pageItems.map((e) => (
+                    <TableRow key={e.id}>
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
+                        {formatDateTime(e.created_at)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge className={ACTION_BADGE_CLASS[e.action] ?? 'bg-slate-100 text-slate-600'}>
+                          {e.action}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{describeEntry(e)}</TableCell>
+                      <TableCell>{e.operator ?? '-'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <Pagination {...pg} onPageChange={pg.setPage} onPageSizeChange={pg.setPageSize} />
+            </>
           )}
         </CardContent>
       </Card>

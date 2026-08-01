@@ -1,56 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion } from 'motion/react'
-import { Camera, Loader2, PackagePlus, CheckCircle2, CircleAlert, Sparkles } from 'lucide-react'
+import { Camera, Loader2, CircleAlert } from 'lucide-react'
 import { PageHeader, SuccessBanner, ErrorBanner } from '@/components/feedback'
 import { ScanHero } from '@/components/scan/ScanHero'
 import { useAppStore } from '@/store/appStore'
-import { formatPrice, formatTime, isToday, productName } from '@/lib/formatters'
+import { isToday, productName } from '@/lib/formatters'
 import { backend } from '@/lib/api'
+import { uploadProductPhoto } from '@/lib/photo'
 import { playSound } from '@/lib/sounds'
 import { useOnline } from '@/lib/useOnline'
 import { CATEGORIES, type Category, type Product } from '@/types'
 import {
-  SPEC_FIELDS, SPEC_LABELS, SPEC_PLACEHOLDERS, specFieldsFor,
+  SPEC_FIELDS, specFieldsFor,
   type SpecField,
 } from '@/lib/productSpecs'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { Card, CardContent } from '@/components/ui/card'
+import { MatchedProductCard } from './inbound/MatchedProductCard'
+import { NewProductDialog, type NewProductForm } from './inbound/NewProductDialog'
+import { PhotoDraftDialog, type PhotoDraftItem } from './inbound/PhotoDraftDialog'
+import { TodayInboundTable } from './inbound/TodayInboundTable'
 
 const NO_SUPPLIER = '__none__'
-
-// 品牌预选列表（常见渔具品牌），"自定义"选项触发自由输入
-const BRAND_PRESETS = [
-  '__custom__', '光威', '汉鼎', '化氏', '天元', '宝飞龙', '名伦', '开沃',
-  '达亿瓦', '禧玛诺', '伽玛卡兹', '钓鱼王', '佳钓尼', '狼王', '海伯',
-  '阿布加西亚', '美人鱼', '大力马', 'YGK', '东丽', '龙王恨', '老鬼',
-  '西部风', '丸九', '土肥富', '欧娜', '慕斯达', '千秋', 'BKK',
-  'Megabass', '连球', '阿卢', 'Shimano', 'Abu Garcia',
-]
 
 // 元字符串转分，非法输入返回 null
 function yuanToCents(v: string): number | null {
@@ -76,22 +46,13 @@ async function compressImage(file: File): Promise<{ base64: string; mime: string
   return { base64: dataUrl.split(',')[1] ?? '', mime: 'image/jpeg' }
 }
 
-interface PhotoDraftItem {
-  key: number
-  product_id: number | null // null = 新商品，确认时自动建档
-  brand: string | null
-  model: string | null
-  category: string
-  quantity: number
-  costYuan: string // 可编辑，元
-}
-
 export function InboundPage() {
   const findProductByBarcode = useAppStore((s) => s.findProductByBarcode)
   const totalStockOf = useAppStore((s) => s.totalStockOf)
   const lastCostOf = useAppStore((s) => s.lastCostOf)
   const addInbound = useAppStore((s) => s.addInbound)
   const addProduct = useAppStore((s) => s.addProduct)
+  const updateProduct = useAppStore((s) => s.updateProduct)
   const suppliers = useAppStore((s) => s.suppliers)
   const transactions = useAppStore((s) => s.transactions)
   const batches = useAppStore((s) => s.batches)
@@ -113,20 +74,22 @@ export function InboundPage() {
   const [supplierId, setSupplierId] = useState(NO_SUPPLIER)
   const [operator, setOperator] = useState('阿杜')
 
-  // 新建商品 Dialog
+  // 新建商品 Dialog（元字符串表单；安全库存空串=不单独设，按默认 5 预警）
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [npCategory, setNpCategory] = useState<Category>('其他')
-  const [npSubCategory, setNpSubCategory] = useState('')
-  const [npBrand, setNpBrand] = useState('')
-  const [npBrandCustom, setNpBrandCustom] = useState('')
-  const [npModel, setNpModel] = useState('')
-  const [npCostYuan, setNpCostYuan] = useState('')
-  const [npSuggestYuan, setNpSuggestYuan] = useState('')
-  const [npLocation, setNpLocation] = useState('')
-  // 安全库存：空串=不单独设，按默认 5 预警（饵料/鱼钩这类消耗快的老板自己调大）
-  const [npMinStock, setNpMinStock] = useState('')
-  // 渔具规格（按品类出不同字段，全部选填）
-  const [npSpecs, setNpSpecs] = useState<Record<SpecField, string>>(emptySpecs)
+  const [npForm, setNpForm] = useState<NewProductForm>({
+    category: '其他',
+    subCategory: '',
+    brand: '',
+    brandCustom: '',
+    model: '',
+    costYuan: '',
+    suggestYuan: '',
+    location: '',
+    minStock: '',
+    specs: emptySpecs(),
+    photoDataUrl: null,
+  })
+  const patchNpForm = (patch: Partial<NewProductForm>) => setNpForm((f) => ({ ...f, ...patch }))
 
   // 拍送货单（AI 多模态识别 → 入库草稿，人工逐行核对后落库）
   const [aiEnabled, setAiEnabled] = useState(false)
@@ -227,18 +190,18 @@ export function InboundPage() {
 
   const handleCreateProduct = async () => {
     if (submitting) return
-    const cost = yuanToCents(npCostYuan)
+    const cost = yuanToCents(npForm.costYuan)
     if (cost === null) {
       setError('新建商品：进价格式不正确')
       return
     }
-    const suggest = npSuggestYuan.trim() === '' ? null : yuanToCents(npSuggestYuan)
-    if (npSuggestYuan.trim() !== '' && suggest === null) {
+    const suggest = npForm.suggestYuan.trim() === '' ? null : yuanToCents(npForm.suggestYuan)
+    if (npForm.suggestYuan.trim() !== '' && suggest === null) {
       setError('新建商品：建议售价格式不正确')
       return
     }
     // 安全库存：留空=默认 5；填了必须是 ≥0 的整数
-    const minStockRaw = npMinStock.trim()
+    const minStockRaw = npForm.minStock.trim()
     let minStock: number | null = null
     if (minStockRaw !== '') {
       const n = Number(minStockRaw)
@@ -249,33 +212,45 @@ export function InboundPage() {
       minStock = n
     }
     // SKU 留空，由后端（浏览器预览时为 mock 路径）按统一的五段式规则自动生成
-    const brand = npBrand === '__custom__'
-      ? (npBrandCustom.trim() || null)
-      : (npBrand.trim() || null)
+    const brand = npForm.brand === '__custom__'
+      ? (npForm.brandCustom.trim() || null)
+      : (npForm.brand.trim() || null)
 
     setSubmitting(true)
     try {
       const p = await addProduct({
         sku_code: '',
         barcode: barcode.trim() || null,
-        category: npCategory,
-        sub_category: npSubCategory.trim() || null,
+        category: npForm.category,
+        sub_category: npForm.subCategory.trim() || null,
         brand,
-        model: npModel.trim() || null,
+        model: npForm.model.trim() || null,
         cost_price: cost,
         suggest_price: suggest,
-        location: npLocation.trim() || null,
+        location: npForm.location.trim() || null,
         status: '待盘点',
         min_stock: minStock,
         // 只提交当前品类展示的规格字段，避免切换品类后残留旧值混进来
         ...Object.fromEntries(
-          specFieldsFor(npCategory).map((f) => [f, npSpecs[f].trim() || null]),
+          specFieldsFor(npForm.category).map((f) => [f, npForm.specs[f].trim() || null]),
         ),
       })
+      // 商品图片：建档成功拿到 id 才落盘（选图时已压好）。存不上不挡入库，之后编辑商品再补
+      if (npForm.photoDataUrl && backend) {
+        try {
+          const base64 = npForm.photoDataUrl.split(',')[1] ?? ''
+          const fileName = await uploadProductPhoto(p.id, base64)
+          await updateProduct(p.id, { photo_path: fileName })
+        } catch {
+          // 静默降级：入库已成功，图片以后补
+        }
+      }
       setDialogOpen(false)
       setNotFound(false)
       setMatched(p)
       prefillForm(p)
+      // 图片是这件商品专属的，清掉；其他字段保留方便连续录入同类货
+      patchNpForm({ photoDataUrl: null })
       setError('')
     } catch (e) {
       setError(`新建商品失败：${e instanceof Error ? e.message : String(e)}`)
@@ -441,112 +416,27 @@ export function InboundPage() {
 
       {/* 搜索结果：已匹配商品 —— 全站第二重要界面，视觉升舱 */}
       {matched && (
-        <Card className="gap-0 overflow-hidden py-0">
-          {/* 品牌色顶条：一眼区别于普通卡片 */}
-          <div className="h-1.5 bg-gradient-to-r from-brand-500 via-brand-600 to-brand-700" />
-          <CardHeader className="pt-5">
-            <CardTitle className="flex items-center gap-3 text-lg">
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-700">
-                <CheckCircle2 className="size-3.5" />
-                匹配成功
-              </span>
-              {productName(matched)}
-              <span className="text-sm font-normal text-muted-foreground">
-                {matched.category}
-              </span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 pb-5">
-            {/* 商品信息区：灰底分区，与表单区拉开层级 */}
-            <div className="grid grid-cols-2 gap-x-8 gap-y-2 rounded-xl bg-slate-50 px-5 py-4 text-sm text-slate-600 md:grid-cols-4">
-              <div>
-                <div className="text-xs text-slate-400">SKU</div>
-                <div className="font-mono font-medium text-slate-800">{matched.sku_code}</div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-400">条码</div>
-                <div className="font-mono font-medium text-slate-800">{matched.barcode ?? '-'}</div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-400">当前库存</div>
-                <div className="font-semibold text-brand-600">{totalStockOf(matched.id)} 件</div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-400">最近进价</div>
-                <div className="font-semibold text-slate-800">{formatPrice(lastCostOf(matched.id))}</div>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
-              <div className="space-y-1">
-                <Label>入库数量 *</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label>进价（元）*</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={costYuan}
-                  onChange={(e) => setCostYuan(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label>货位</Label>
-                <Input value={location} onChange={(e) => setLocation(e.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <Label>供应商</Label>
-                <Select value={supplierId} onValueChange={setSupplierId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="不指定" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NO_SUPPLIER}>不指定</SelectItem>
-                    {suppliers.map((s) => (
-                      <SelectItem key={s.id} value={String(s.id)}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label>操作人</Label>
-                <Input value={operator} onChange={(e) => setOperator(e.target.value)} />
-              </div>
-            </div>
-            {/* 操作区沉底：与信息区分层 */}
-            <div className="-mx-6 -mb-5 mt-2 flex gap-3 border-t bg-slate-50/60 px-6 py-4">
-              <Button
-                asChild
-                onClick={handleConfirm}
-                disabled={submitting}
-                className="bg-brand-600 hover:bg-brand-700"
-              >
-                <motion.button whileTap={{ scale: 0.96 }}>
-                {submitting ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <PackagePlus className="size-4" />
-                )}
-                {submitting ? '入库中...' : '确认入库'}
-                </motion.button>
-              </Button>
-              <Button variant="outline" onClick={() => setDialogOpen(true)}>
-                新建商品
-              </Button>
-              <Button variant="ghost" onClick={handleCancel}>
-                取消
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        <MatchedProductCard
+          matched={matched}
+          totalStock={totalStockOf(matched.id)}
+          lastCost={lastCostOf(matched.id)}
+          quantity={quantity}
+          onQuantityChange={setQuantity}
+          costYuan={costYuan}
+          onCostYuanChange={setCostYuan}
+          location={location}
+          onLocationChange={setLocation}
+          supplierId={supplierId}
+          onSupplierIdChange={setSupplierId}
+          noSupplierValue={NO_SUPPLIER}
+          suppliers={suppliers}
+          operator={operator}
+          onOperatorChange={setOperator}
+          submitting={submitting}
+          onConfirm={handleConfirm}
+          onOpenCreate={() => setDialogOpen(true)}
+          onCancel={handleCancel}
+        />
       )}
 
       {/* 搜索结果：未找到 */}
@@ -575,261 +465,27 @@ export function InboundPage() {
       )}
 
       {/* 今日入库记录 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">今日入库记录（{todayInbounds.length} 条）</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {todayInbounds.length === 0 ? (
-            <div className="py-8 text-center text-sm text-muted-foreground">今日暂无入库记录</div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>品名</TableHead>
-                  <TableHead>批次号</TableHead>
-                  <TableHead className="text-right">数量</TableHead>
-                  <TableHead className="text-right">进价</TableHead>
-                  <TableHead>货位</TableHead>
-                  <TableHead>操作人</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {todayInbounds.map((t) => {
-                  const p = products.find((x) => x.id === t.product_id)
-                  const b = batches.find((x) => x.id === t.batch_id)
-                  return (
-                    <TableRow key={t.id}>
-                      <TableCell>{formatTime(t.timestamp)}</TableCell>
-                      <TableCell>
-                        {p ? productName(p) : `#${t.product_id}`}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{b?.batch_no ?? '-'}</TableCell>
-                      <TableCell className="text-right">{t.quantity}</TableCell>
-                      <TableCell className="text-right">{formatPrice(t.unit_price)}</TableCell>
-                      <TableCell>{b?.location ?? '-'}</TableCell>
-                      <TableCell>{t.operator ?? '-'}</TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <TodayInboundTable records={todayInbounds} products={products} batches={batches} />
 
       {/* 新建商品 Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>新建商品</DialogTitle>
-            <DialogDescription>条码 {barcode.trim() || '-'} 将自动关联到新商品</DialogDescription>
-          </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <Label>品类 *</Label>
-              <Select value={npCategory} onValueChange={(v) => setNpCategory(v as Category)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CATEGORIES.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {c}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1">
-              <Label>子类</Label>
-              <Input
-                value={npSubCategory}
-                onChange={(e) => setNpSubCategory(e.target.value)}
-                placeholder="如：手竿、PE线、伊势尼..."
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>品牌</Label>
-              <Select value={npBrand} onValueChange={(v) => setNpBrand(v)}>
-                <SelectTrigger>
-                  <SelectValue placeholder="选择品牌..." />
-                </SelectTrigger>
-                <SelectContent className="max-h-64">
-                  {BRAND_PRESETS.map((b) => (
-                    <SelectItem key={b} value={b}>
-                      {b === '__custom__' ? '+ 自定义品牌' : b}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {npBrand === '__custom__' && (
-                <Input
-                  className="mt-1"
-                  value={npBrandCustom}
-                  onChange={(e) => setNpBrandCustom(e.target.value)}
-                  placeholder="输入自定义品牌名"
-                />
-              )}
-            </div>
-            <div className="space-y-1">
-              <Label>型号/规格</Label>
-              <Input value={npModel} onChange={(e) => setNpModel(e.target.value)} placeholder="如：3.6m 28调" />
-            </div>
-            <div className="space-y-1">
-              <Label>进价（元）*</Label>
-              <Input
-                type="number"
-                min={0}
-                step="0.01"
-                value={npCostYuan}
-                onChange={(e) => setNpCostYuan(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>建议售价（元）</Label>
-              <Input
-                type="number"
-                min={0}
-                step="0.01"
-                value={npSuggestYuan}
-                onChange={(e) => setNpSuggestYuan(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>货位</Label>
-              <Input value={npLocation} onChange={(e) => setNpLocation(e.target.value)} />
-            </div>
-            <div className="space-y-1">
-              <Label>安全库存</Label>
-              <Input
-                type="number"
-                min="0"
-                step="1"
-                value={npMinStock}
-                onChange={(e) => setNpMinStock(e.target.value)}
-                placeholder="低于这个数就提醒你，默认 5"
-              />
-            </div>
-            {/* 渔具规格：按品类出不同字段，全部选填，不填也能入库 */}
-            <div className="col-span-2 space-y-2 border-t pt-3">
-              <div className="text-xs text-muted-foreground">
-                规格（选填，随品类变化，如味型/备注可写进颜色或型号里）
-              </div>
-              <div className="grid grid-cols-3 gap-3">
-                {specFieldsFor(npCategory).map((f) => (
-                  <div key={f} className="space-y-1">
-                    <Label>{SPEC_LABELS[f]}</Label>
-                    <Input
-                      value={npSpecs[f]}
-                      onChange={(e) =>
-                        setNpSpecs((s) => ({ ...s, [f]: e.target.value }))
-                      }
-                      placeholder={SPEC_PLACEHOLDERS[f]}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setDialogOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={handleCreateProduct} disabled={submitting}>
-              {submitting && <Loader2 className="size-4 animate-spin" />}
-              {submitting ? '创建中...' : '创建并入库'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <NewProductDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        barcode={barcode.trim()}
+        form={npForm}
+        onFormChange={patchNpForm}
+        submitting={submitting}
+        onSubmit={handleCreateProduct}
+      />
 
       {/* 拍送货单识别草稿：人工逐行核对后确认入库 */}
-      <Dialog open={photoDraft !== null} onOpenChange={(open) => !open && setPhotoDraft(null)}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Sparkles className="size-5 text-brand-500" />
-              送货单识别结果（{photoDraft?.length ?? 0} 项）
-            </DialogTitle>
-            <DialogDescription>
-              AI 识别可能有误，请逐行核对数量和进价。标「新商品」的确认时会自动建档（编号自动生成）。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="max-h-96 overflow-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>商品</TableHead>
-                  <TableHead>品类</TableHead>
-                  <TableHead className="w-24 text-right">数量</TableHead>
-                  <TableHead className="w-32 text-right">进价（元）</TableHead>
-                  <TableHead className="w-24">匹配</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {photoDraft?.map((it) => (
-                  <TableRow key={it.key}>
-                    <TableCell>
-                      {[it.brand, it.model].filter(Boolean).join(' ') || (
-                        <span className="text-muted-foreground">未识别名称</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm">{it.category}</TableCell>
-                    <TableCell className="text-right">
-                      <Input
-                        type="number"
-                        min={1}
-                        value={it.quantity}
-                        onChange={(e) =>
-                          patchDraftItem(it.key, { quantity: parseInt(e.target.value, 10) || 0 })
-                        }
-                        className="h-8 w-20 text-right"
-                      />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={it.costYuan}
-                        onChange={(e) => patchDraftItem(it.key, { costYuan: e.target.value })}
-                        placeholder="必填"
-                        className="h-8 w-28 text-right"
-                      />
-                    </TableCell>
-                    <TableCell>
-                      {it.product_id ? (
-                        <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">
-                          已有商品
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                          新商品
-                        </span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setPhotoDraft(null)} disabled={photoBusy}>
-              取消
-            </Button>
-            <Button onClick={confirmPhotoDraft} disabled={photoBusy}>
-              {photoBusy ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <CheckCircle2 className="size-4" />
-              )}
-              {photoBusy ? '入库中...' : `核对无误，确认入库 ${photoDraft?.length ?? 0} 项`}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <PhotoDraftDialog
+        draft={photoDraft}
+        onClose={() => setPhotoDraft(null)}
+        onPatchItem={patchDraftItem}
+        busy={photoBusy}
+        onConfirm={confirmPhotoDraft}
+      />
     </div>
   )
 }

@@ -29,9 +29,16 @@ const os = require('os')
   console.log('sub_category 字段: OK')
 
   // 新增的 product:update / product:delete 通道应可用（delete 只验证拒绝路径，不产生副作用）
-  const del = await win.evaluate(() => window.fi.invoke('product:delete', { id: 1 }))
-  console.log('product:delete(有记录商品) →', JSON.stringify(del))
-  if (del.ok !== false) throw new Error('有记录商品应被拒绝删除')
+  // 动态找一个有批次的商品（不硬编码 id：清理演示数据后 id 会变化）
+  const withBatch = data.batches.find((b) => b.quantity > 0)
+  if (!withBatch) throw new Error('没有带库存的批次，无法验证删除拒绝路径')
+  const del = await win.evaluate((pid) => window.fi.invoke('product:delete', { id: pid }), withBatch.product_id)
+  console.log('product:delete(有批次商品) →', JSON.stringify(del))
+  if (del.ok !== false) throw new Error('有批次商品应被拒绝删除')
+  // 不存在的 id 也不能返回成功（防止列表过期时误报"删除成功"）
+  const delGhost = await win.evaluate(() => window.fi.invoke('product:delete', { id: 999999 }))
+  console.log('product:delete(不存在商品) →', JSON.stringify(delGhost))
+  if (delGhost.ok !== false) throw new Error('不存在商品应返回失败而非 ok:true')
 
   // AI 通道：未配置 Key 时应优雅降级（ok:false），不能抛异常
   const aiStatus = await win.evaluate(() => window.fi.invoke('ai:status'))

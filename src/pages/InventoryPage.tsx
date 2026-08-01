@@ -1,71 +1,35 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ChevronDown, ChevronRight, CalendarClock, Download, Loader2, Pencil, Search, Tag, Trash2, TriangleAlert, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
+import { Download, QrCode } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
+import { backend } from '@/lib/api'
 import { PriceLabelDialog } from '@/components/PriceLabel'
-import { formatDate, formatPrice, productName, csvCell } from '@/lib/formatters'
+import { SellQrLabelDialog } from '@/components/SellQrLabel'
+import { productName, csvCell } from '@/lib/formatters'
 import { computeExpiring } from '@/lib/expiry'
 import {
-  SPEC_FIELDS, SPEC_LABELS, SPEC_PLACEHOLDERS, collectSpecs, formatSpecs,
-  specFieldsFor, specsToForm, type SpecField,
+  SPEC_FIELDS, collectSpecs, specsToForm, type SpecField,
 } from '@/lib/productSpecs'
-import { CATEGORIES, PRICE_LEVELS, PRICE_LEVEL_LABELS, PRODUCT_STATUSES, type Category, type InventoryBatch, type PriceLevel, type Product, type ProductStatus } from '@/types'
-import { Badge } from '@/components/ui/badge'
+import { PRICE_LEVELS, PRICE_LEVEL_LABELS, PRODUCT_STATUSES, type Category, type PriceLevel, type Product, type ProductStatus } from '@/types'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { cn } from '@/lib/utils'
 import { ErrorBanner, PageHeader, SuccessBanner } from '@/components/feedback'
+import { DeleteProductDialog } from './inventory/DeleteProductDialog'
+import { EditProductDialog, type EditProductForm } from './inventory/EditProductDialog'
+import { InventoryFilterBar } from './inventory/InventoryFilterBar'
+import { InventoryTable, LOW_STOCK_THRESHOLD } from './inventory/InventoryTable'
+import { BatchActionBar } from './inventory/BatchActionBar'
+import { BatchPriceDialog } from './inventory/BatchPriceDialog'
+import { BatchStatusDialog } from './inventory/BatchStatusDialog'
+import { ProductHistoryDialog } from './inventory/ProductHistoryDialog'
+import type { BatchPriceMode } from '@/store/appStore'
 
 const ALL = '__all__'
-const LOW_STOCK_THRESHOLD = 5
-
-// 状态标签配色，一眼区分商品状态
-const STATUS_BADGE_CLASS: Record<ProductStatus, string> = {
-  已盘点: 'bg-green-100 text-green-700',
-  待盘点: 'bg-yellow-100 text-yellow-700',
-  已上架虾皮: 'bg-purple-100 text-purple-700',
-  已售罄: 'bg-red-100 text-red-700',
-  停产: 'bg-slate-200 text-slate-500',
-}
 
 type SortDir = 'asc' | 'desc'
-type BatchSortKey = 'quantity' | 'cost_price' | 'inbound_date'
 
 // 排序循环：未排序 → 升序 → 降序 → 取消排序（恢复默认顺序）
 function cycleDir(dir: SortDir | null): SortDir | null {
   return dir === null ? 'asc' : dir === 'asc' ? 'desc' : null
-}
-
-// 表头排序方向小箭头：未排序时显示灰色双向箭头，提示这一列可以点
-function SortIcon({ dir }: { dir: SortDir | null }) {
-  if (dir === 'asc') return <ArrowUp className="size-3.5" />
-  if (dir === 'desc') return <ArrowDown className="size-3.5" />
-  return <ArrowUpDown className="size-3.5 opacity-40" />
 }
 
 export function InventoryPage() {
@@ -83,7 +47,6 @@ export function InventoryPage() {
   const [lowOnly, setLowOnly] = useState(false)
   // 临期快捷筛选：仪表盘「临期商品」卡片跳转过来时自动开启
   const [expiringOnly, setExpiringOnly] = useState(false)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [searchParams] = useSearchParams()
 
   // 临期/过期商品（productId → 详情）：行徽章 + 临期筛选共用；与后端 product:expiring 同口径本地算
@@ -127,6 +90,84 @@ export function InventoryPage() {
   const [deleting, setDeleting] = useState<Product | null>(null)
   // 价格标签打印：点商品行里的「打标签」打开预览
   const [labeling, setLabeling] = useState<Product | null>(null)
+  // 开单二维码贴纸：批量打印当前筛选出的商品；serverUrl 为空说明手机看店服务没开
+  const [qrSheetOpen, setQrSheetOpen] = useState(false)
+  const [qrServerUrl, setQrServerUrl] = useState<string | null>(null)
+  // 库存变动历史：点商品行里的「历史」打开
+  const [historyProduct, setHistoryProduct] = useState<Product | null>(null)
+  // 批量操作：多选（跨页保留）+ 改价/改状态弹窗
+  const batchUpdateProducts = useAppStore((s) => s.batchUpdateProducts)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [priceDialogOpen, setPriceDialogOpen] = useState(false)
+  const [statusDialogOpen, setStatusDialogOpen] = useState(false)
+  const [batchBusy, setBatchBusy] = useState(false)
+
+  // 商品列表刷新后把已经不存在的 id 从选中集里剔掉（防删除后误操作）
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const alive = new Set([...prev].filter((id) => products.some((p) => p.id === id)))
+      return alive.size === prev.size ? prev : alive
+    })
+  }, [products])
+
+  const toggleSelect = (id: number) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  // 表头全选/取消全选：只作用当前页的行，其他页的选中保留
+  const togglePage = (ids: number[], checked: boolean) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      for (const id of ids) {
+        if (checked) next.add(id)
+        else next.delete(id)
+      }
+      return next
+    })
+
+  const runBatchPrice = async (priceMode: BatchPriceMode) => {
+    if (batchBusy) return
+    setBatchBusy(true)
+    setPageError('')
+    try {
+      const ids = [...selectedIds]
+      const r = await batchUpdateProducts({ ids, priceMode })
+      setPageSuccess(
+        priceMode.kind === 'ratio'
+          ? `已把 ${r.updated} 个商品的建议售价和档次价都打 ${(priceMode.ratio * 10).toFixed(1).replace(/\.0$/, '')} 折`
+          : `已把 ${r.updated} 个商品的建议售价和档次价都改成 ${(priceMode.priceFen / 100).toFixed(2)} 元`,
+      )
+      setPriceDialogOpen(false)
+      setSelectedIds(new Set())
+    } catch (e) {
+      setPageError(e instanceof Error ? e.message : String(e))
+      setPriceDialogOpen(false)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  const runBatchStatus = async (status: ProductStatus) => {
+    if (batchBusy) return
+    setBatchBusy(true)
+    setPageError('')
+    try {
+      const ids = [...selectedIds]
+      const r = await batchUpdateProducts({ ids, status })
+      setPageSuccess(`已把 ${r.updated} 个商品的状态改成「${status}」`)
+      setStatusDialogOpen(false)
+      setSelectedIds(new Set())
+    } catch (e) {
+      setPageError(e instanceof Error ? e.message : String(e))
+      setStatusDialogOpen(false)
+    } finally {
+      setBatchBusy(false)
+    }
+  }
   // 保存防重复：await 期间置 busy，双击不会并发触发两次 updateProduct
   const [saving, setSaving] = useState(false)
   const [pageError, setPageError] = useState('')
@@ -139,15 +180,15 @@ export function InventoryPage() {
     const t = setTimeout(() => setPageSuccess(''), 3000)
     return () => clearTimeout(t)
   }, [pageSuccess])
-  const [form, setForm] = useState({
-    category: '' as Category | '',
+  const [form, setForm] = useState<EditProductForm>({
+    category: '',
     sub_category: '',
     brand: '',
     model: '',
     cost_price: '',
     suggest_price: '',
     location: '',
-    status: '' as ProductStatus | '',
+    status: '',
     min_stock: '', // 安全库存：空串=不单独设，按默认 5 预警
   })
   // 渔具规格表单（按品类出不同字段，全部选填）
@@ -296,17 +337,10 @@ export function InventoryPage() {
     })
   }, [products, category, status, debouncedKeyword, lowOnly, expiringOnly, expiringMap, totalStockOf])
 
-  // 表头排序（纯前端，不动数据层）：主表按总库存，批次子表按数量/单价/入库日期
+  // 表头排序（纯前端，不动数据层）：主表按总库存（批次子表排序在 InventoryTable 内部）
   const [stockSort, setStockSort] = useState<SortDir | null>(null)
-  const [batchSort, setBatchSort] = useState<{ key: BatchSortKey; dir: SortDir } | null>(null)
 
-  const toggleBatchSort = (key: BatchSortKey) =>
-    setBatchSort((cur) => {
-      if (!cur || cur.key !== key) return { key, dir: 'asc' }
-      return cur.dir === 'asc' ? { key, dir: 'desc' } : null
-    })
-
-  // 先筛选后排序：排序只作用在筛选结果上
+  // 先筛选后排序：排序只作用在筛选结果上（分页在 InventoryTable 内部，切在排序之后）
   const sorted = useMemo(() => {
     if (!stockSort) return filtered
     return [...filtered].sort((a, b) => {
@@ -314,25 +348,6 @@ export function InventoryPage() {
       return (stockSort === 'asc' ? d : -d) || a.id - b.id
     })
   }, [filtered, stockSort, totalStockOf])
-
-  const sortBatchList = (list: InventoryBatch[]) => {
-    if (!batchSort) return list
-    return [...list].sort((a, b) => {
-      const d =
-        batchSort.key === 'inbound_date'
-          ? a.inbound_date.localeCompare(b.inbound_date)
-          : a[batchSort.key] - b[batchSort.key]
-      return (batchSort.dir === 'asc' ? d : -d) || a.id - b.id
-    })
-  }
-
-  const toggleExpand = (id: number) =>
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
 
   // csvCell 已从 @/lib/formatters 导入（含逗号/引号/换行的字段包引号、引号双写）
 
@@ -373,16 +388,37 @@ export function InventoryPage() {
     URL.revokeObjectURL(url)
   }
 
+  // 打开开单码打印：先查手机看店服务地址（贴纸二维码要用）；mock 预览用演示地址
+  const openQrSheet = async () => {
+    if (backend) {
+      try {
+        const s = await backend.invoke('server:status')
+        setQrServerUrl(s?.running && s?.url ? String(s.url) : null)
+      } catch {
+        setQrServerUrl(null)
+      }
+    } else {
+      setQrServerUrl('http://192.168.1.100:17532/?token=演示地址')
+    }
+    setQrSheetOpen(true)
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="库存查询"
         subtitle="按商品、批次、货位多维度查询当前库存"
         action={
-          <Button variant="outline" onClick={exportCsv} disabled={filtered.length === 0}>
-            <Download className="size-4" />
-            导出CSV
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => void openQrSheet()} disabled={filtered.length === 0}>
+              <QrCode className="size-4" />
+              打印开单码
+            </Button>
+            <Button variant="outline" onClick={exportCsv} disabled={filtered.length === 0}>
+              <Download className="size-4" />
+              导出CSV
+            </Button>
+          </div>
         }
       />
 
@@ -390,443 +426,67 @@ export function InventoryPage() {
       {pageError && <ErrorBanner>{pageError}</ErrorBanner>}
 
       {/* 筛选区 */}
-      <Card>
-        <CardContent className="flex flex-wrap items-center gap-3 pt-6">
-          <div className="relative w-72">
-            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="搜索SKU/品牌/型号/条码..."
-              className="pl-9"
-            />
-          </div>
-          <Select value={category} onValueChange={setCategory}>
-            <SelectTrigger className="w-36">
-              <SelectValue placeholder="品类" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL}>全部品类</SelectItem>
-              {CATEGORIES.map((c) => (
-                <SelectItem key={c} value={c}>
-                  {c}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger className="w-36">
-              <SelectValue placeholder="状态" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL}>全部状态</SelectItem>
-              {PRODUCT_STATUSES.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            variant={lowOnly ? 'destructive' : 'outline'}
-            onClick={() => setLowOnly((v) => !v)}
-            title="只看库存低于预警线的商品（未单独设置预警线的按 5 件算）"
-          >
-            <TriangleAlert className="size-4" />
-            低库存
-          </Button>
-          <Button
-            variant="outline"
-            className={expiringOnly ? 'border-amber-500 bg-amber-500 text-white hover:bg-amber-600 hover:text-white' : ''}
-            onClick={() => setExpiringOnly((v) => !v)}
-            title="只看 30 天内到期或已经过期的商品"
-          >
-            <CalendarClock className="size-4" />
-            临期
-          </Button>
-          <span className="text-sm text-muted-foreground">共 {filtered.length} 个商品</span>
-        </CardContent>
-      </Card>
+      <InventoryFilterBar
+        keyword={keyword}
+        onKeywordChange={setKeyword}
+        category={category}
+        onCategoryChange={setCategory}
+        status={status}
+        onStatusChange={setStatus}
+        lowOnly={lowOnly}
+        onToggleLowOnly={() => setLowOnly((v) => !v)}
+        expiringOnly={expiringOnly}
+        onToggleExpiringOnly={() => setExpiringOnly((v) => !v)}
+        filteredCount={filtered.length}
+        allValue={ALL}
+      />
+
+      {/* 批量操作条：勾选商品后出现 */}
+      {selectedIds.size > 0 && (
+        <BatchActionBar
+          count={selectedIds.size}
+          busy={batchBusy}
+          onPrice={() => setPriceDialogOpen(true)}
+          onStatus={() => setStatusDialogOpen(true)}
+          onClear={() => setSelectedIds(new Set())}
+        />
+      )}
 
       {/* 库存表格 */}
-      <Card>
-        <CardContent className="pt-6">
-          {filtered.length === 0 ? (
-            <div className="py-8 text-center text-sm text-muted-foreground">
-              {products.length === 0
-                ? '还没有商品，点左边菜单的「扫码入库」，扫一下商品条码就能录入第一件货'
-                : '没有符合条件的商品，换个关键词或筛选条件试试'}
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-10" />
-                  <TableHead>SKU</TableHead>
-                  <TableHead>品类</TableHead>
-                  <TableHead>品牌</TableHead>
-                  <TableHead>型号规格</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">
-                    <button
-                      onClick={() => setStockSort((d) => cycleDir(d))}
-                      className="ml-auto flex cursor-pointer items-center gap-1 hover:text-foreground/60"
-                      title="点击按库存数量排序"
-                    >
-                      总库存
-                      <SortIcon dir={stockSort} />
-                    </button>
-                  </TableHead>
-                  <TableHead>货位</TableHead>
-                  <TableHead className="w-28 text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sorted.map((p) => {
-                  const total = totalStockOf(p.id)
-                  const low = total < (p.min_stock ?? LOW_STOCK_THRESHOLD)
-                  const isOpen = expanded.has(p.id)
-                  return (
-                    <Fragment key={p.id}>
-                      {/* 行高压到 py-1.5 + 小号操作按钮：一屏能多看几行货，又不至于挤 */}
-                      <TableRow className={cn(low && 'bg-red-50 hover:bg-red-100')}>
-                        <TableCell className="py-1.5">
-                          <button
-                            onClick={() => toggleExpand(p.id)}
-                            className="text-slate-500 hover:text-slate-900 cursor-pointer"
-                            title={isOpen ? '收起批次' : '展开批次'}
-                          >
-                            {isOpen ? (
-                              <ChevronDown className="size-4" />
-                            ) : (
-                              <ChevronRight className="size-4" />
-                            )}
-                          </button>
-                        </TableCell>
-                        <TableCell className="py-1.5 font-mono text-xs">{p.sku_code}</TableCell>
-                        <TableCell className="py-1.5">{p.category}</TableCell>
-                        <TableCell className="py-1.5">{p.brand ?? '—'}</TableCell>
-                        <TableCell className="py-1.5">
-                          {p.model ?? '—'}
-                          {(() => {
-                            const ex = expiringMap.get(p.id)
-                            if (!ex) return null
-                            return (
-                              <Badge
-                                className={`ml-2 ${ex.expired ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}
-                                title={`保质期到 ${ex.expiry_date}`}
-                              >
-                                {ex.expired
-                                  ? '已过期'
-                                  : ex.daysLeft === 0
-                                    ? '今天过期'
-                                    : `${ex.daysLeft} 天后过期`}
-                              </Badge>
-                            )
-                          })()}
-                        </TableCell>
-                        <TableCell className="py-1.5">
-                          <Badge className={STATUS_BADGE_CLASS[p.status]}>{p.status}</Badge>
-                        </TableCell>
-                        <TableCell
-                          className={cn('py-1.5 text-right font-medium', low && 'text-red-600')}
-                        >
-                          {total}
-                        </TableCell>
-                        <TableCell className="py-1.5">{p.location ?? '-'}</TableCell>
-                        <TableCell className="py-1.5 text-right">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7"
-                              title="打印价格标签"
-                              onClick={() => setLabeling(p)}
-                            >
-                              <Tag className="size-4 text-brand-600" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7"
-                              title="编辑商品"
-                              onClick={() => openEdit(p)}
-                            >
-                              <Pencil className="size-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7"
-                              title="删除商品"
-                              onClick={() => {
-                                setPageError('')
-                                setDeleting(p)
-                              }}
-                            >
-                              <Trash2 className="size-4 text-red-500" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                      {isOpen && (
-                        <TableRow key={`${p.id}-batches`} className="bg-slate-50 hover:bg-slate-50">
-                          <TableCell />
-                          <TableCell colSpan={8} className="py-3">
-                            {formatSpecs(p) && (
-                              <div className="mb-2 text-xs text-slate-500">
-                                规格：<span className="font-medium text-slate-700">{formatSpecs(p)}</span>
-                              </div>
-                            )}
-                            {batchesOf(p.id).length === 0 ? (
-                              <div className="text-xs text-muted-foreground">无批次库存</div>
-                            ) : (
-                              <Table>
-                                <TableHeader>
-                                  <TableRow>
-                                    <TableHead>批次号</TableHead>
-                                    <TableHead className="text-right">
-                                      <button
-                                        onClick={() => toggleBatchSort('quantity')}
-                                        className="ml-auto flex cursor-pointer items-center gap-1 hover:text-foreground/60"
-                                        title="点击按数量排序"
-                                      >
-                                        数量
-                                        <SortIcon
-                                          dir={batchSort?.key === 'quantity' ? batchSort.dir : null}
-                                        />
-                                      </button>
-                                    </TableHead>
-                                    <TableHead className="text-right">
-                                      <button
-                                        onClick={() => toggleBatchSort('cost_price')}
-                                        className="ml-auto flex cursor-pointer items-center gap-1 hover:text-foreground/60"
-                                        title="点击按成本价排序"
-                                      >
-                                        单价
-                                        <SortIcon
-                                          dir={
-                                            batchSort?.key === 'cost_price' ? batchSort.dir : null
-                                          }
-                                        />
-                                      </button>
-                                    </TableHead>
-                                    <TableHead>
-                                      <button
-                                        onClick={() => toggleBatchSort('inbound_date')}
-                                        className="flex cursor-pointer items-center gap-1 hover:text-foreground/60"
-                                        title="点击按入库日期排序"
-                                      >
-                                        入库日期
-                                        <SortIcon
-                                          dir={
-                                            batchSort?.key === 'inbound_date'
-                                              ? batchSort.dir
-                                              : null
-                                          }
-                                        />
-                                      </button>
-                                    </TableHead>
-                                    <TableHead>货位</TableHead>
-                                    <TableHead>供应商</TableHead>
-                                  </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                  {sortBatchList(batchesOf(p.id)).map((b) => (
-                                    <TableRow key={b.id}>
-                                      <TableCell className="font-mono text-xs">
-                                        {b.batch_no}
-                                      </TableCell>
-                                      <TableCell className="text-right">{b.quantity}</TableCell>
-                                      <TableCell className="text-right">
-                                        {formatPrice(b.cost_price)}
-                                      </TableCell>
-                                      <TableCell>{formatDate(b.inbound_date)}</TableCell>
-                                      <TableCell>{b.location ?? '-'}</TableCell>
-                                      <TableCell>
-                                        {suppliers.find((s) => s.id === b.supplier_id)?.name ??
-                                          '-'}
-                                      </TableCell>
-                                    </TableRow>
-                                  ))}
-                                </TableBody>
-                              </Table>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <InventoryTable
+        products={sorted}
+        allEmpty={products.length === 0}
+        totalStockOf={totalStockOf}
+        batchesOf={batchesOf}
+        suppliers={suppliers}
+        expiringMap={expiringMap}
+        stockSort={stockSort}
+        onToggleStockSort={() => setStockSort((d) => cycleDir(d))}
+        onLabel={setLabeling}
+        onEdit={openEdit}
+        onDelete={(p) => {
+          setPageError('')
+          setDeleting(p)
+        }}
+        onHistory={setHistoryProduct}
+        selectedIds={selectedIds}
+        onToggleSelect={toggleSelect}
+        onTogglePage={togglePage}
+      />
 
       {/* 编辑商品 Dialog：SKU 创建后不可改 */}
-      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>编辑商品</DialogTitle>
-            <DialogDescription>
-              SKU <span className="font-mono">{editing?.sku_code}</span> 创建后不可修改
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>品类 *</Label>
-              <Select
-                value={form.category}
-                onValueChange={(v) => setForm((f) => ({ ...f, category: v as Category }))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="选择品类" />
-                </SelectTrigger>
-                <SelectContent>
-                  {CATEGORIES.map((c) => (
-                    <SelectItem key={c} value={c}>
-                      {c}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>子类</Label>
-              <Input
-                value={form.sub_category}
-                onChange={(e) => setForm((f) => ({ ...f, sub_category: e.target.value }))}
-                placeholder="如：手竿 / 纺车轮"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>品牌</Label>
-              <Input
-                value={form.brand}
-                onChange={(e) => setForm((f) => ({ ...f, brand: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>型号规格</Label>
-              <Input
-                value={form.model}
-                onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>最近进价（元）*</Label>
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.cost_price}
-                onChange={(e) => setForm((f) => ({ ...f, cost_price: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>建议售价（元）</Label>
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.suggest_price}
-                onChange={(e) => setForm((f) => ({ ...f, suggest_price: e.target.value }))}
-              />
-              <div className="text-xs text-muted-foreground">这是默认价，卖货时先带出它</div>
-            </div>
-            <div className="space-y-2">
-              <Label>货位</Label>
-              <Input
-                value={form.location}
-                onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))}
-              />
-            </div>
-            {/* 安全库存：饵料/鱼钩这类消耗快的老板可以自己调大；留空按默认 5 */}
-            <div className="space-y-2">
-              <Label>安全库存</Label>
-              <Input
-                type="number"
-                min="0"
-                step="1"
-                value={form.min_stock}
-                onChange={(e) => setForm((f) => ({ ...f, min_stock: e.target.value }))}
-                placeholder="低于这个数就提醒你，默认 5"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>状态 *</Label>
-              <Select
-                value={form.status}
-                onValueChange={(v) => setForm((f) => ({ ...f, status: v as ProductStatus }))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="选择状态" />
-                </SelectTrigger>
-                <SelectContent>
-                  {PRODUCT_STATUSES.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {/* 价格档次：五档各一个价，空着=没设这档；卖货时在出库确认里一键带出 */}
-            <div className="col-span-2 space-y-2 border-t pt-3">
-              <div className="text-xs text-muted-foreground">
-                价格档次（选填，单位：元；空着表示没设这档。卖货时点一下档位就自动带出价格）
-              </div>
-              <div className="grid grid-cols-3 gap-3 md:grid-cols-5">
-                {PRICE_LEVELS.map((t) => (
-                  <div key={t} className="space-y-1">
-                    <Label>{PRICE_LEVEL_LABELS[t]}价</Label>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={tierForm[t]}
-                      onChange={(e) =>
-                        setTierForm((s) => ({ ...s, [t]: e.target.value }))
-                      }
-                      placeholder="没设"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-            {/* 渔具规格：按品类出不同字段，全部选填 */}
-            {form.category && (
-              <div className="col-span-2 space-y-2 border-t pt-3">
-                <div className="text-xs text-muted-foreground">规格（选填，随品类变化）</div>
-                <div className="grid grid-cols-3 gap-3">
-                  {specFieldsFor(form.category).map((f) => (
-                    <div key={f} className="space-y-1">
-                      <Label>{SPEC_LABELS[f]}</Label>
-                      <Input
-                        value={specForm[f]}
-                        onChange={(e) =>
-                          setSpecForm((s) => ({ ...s, [f]: e.target.value }))
-                        }
-                        placeholder={SPEC_PLACEHOLDERS[f]}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditing(null)} disabled={saving}>
-              取消
-            </Button>
-            <Button onClick={saveEdit} disabled={saving}>
-              {saving && <Loader2 className="size-4 animate-spin" />}
-              {saving ? '保存中...' : '保存'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <EditProductDialog
+        editing={editing}
+        form={form}
+        onFormChange={setForm}
+        specForm={specForm}
+        onSpecFormChange={setSpecForm}
+        tierForm={tierForm}
+        onTierFormChange={setTierForm}
+        saving={saving}
+        onSave={saveEdit}
+        onClose={() => setEditing(null)}
+      />
 
       {/* 价格标签预览/打印 Dialog：点商品行的「打标签」打开 */}
       <PriceLabelDialog
@@ -835,27 +495,42 @@ export function InventoryPage() {
         onOpenChange={(open) => !open && setLabeling(null)}
       />
 
+      {/* 开单二维码贴纸：批量打印当前筛选出的商品，微信扫一扫直达开单页 */}
+      <SellQrLabelDialog
+        open={qrSheetOpen}
+        onOpenChange={setQrSheetOpen}
+        products={filtered}
+        serverUrl={qrServerUrl}
+      />
+
       {/* 删除确认 Dialog（危险操作二次确认） */}
-      <Dialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除商品</DialogTitle>
-            <DialogDescription>
-              确定要删掉「{deleting ? productName(deleting) : ''}」（{deleting?.sku_code}
-              ）吗？删掉就找不回来了。如果这个商品有过入库/出库记录，系统会拦着不让删
-              ——只是以后不卖了的话，建议改成「停产」，记录都还在。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDelete}>
-              确认删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteProductDialog
+        deleting={deleting}
+        onCancel={() => setDeleting(null)}
+        onConfirm={confirmDelete}
+      />
+
+      {/* 批量改价 / 批量改状态 Dialog（都有大白话确认话术） */}
+      <BatchPriceDialog
+        open={priceDialogOpen}
+        count={selectedIds.size}
+        busy={batchBusy}
+        onClose={() => setPriceDialogOpen(false)}
+        onConfirm={runBatchPrice}
+      />
+      <BatchStatusDialog
+        open={statusDialogOpen}
+        count={selectedIds.size}
+        busy={batchBusy}
+        onClose={() => setStatusDialogOpen(false)}
+        onConfirm={runBatchStatus}
+      />
+
+      {/* 库存变动历史 Dialog（纯前端筛选流水） */}
+      <ProductHistoryDialog
+        product={historyProduct}
+        onClose={() => setHistoryProduct(null)}
+      />
     </div>
   )
 }

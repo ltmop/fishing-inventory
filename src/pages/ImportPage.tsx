@@ -21,6 +21,8 @@ export function ImportPage() {
   const [errors, setErrors] = useState<string[]>([])
   const [success, setSuccess] = useState('')
   const [importing, setImporting] = useState(false)
+  // 导入方式：skip=只加新商品（默认，老商品保持原样）；update=按 SKU 匹配更新老商品资料
+  const [mode, setMode] = useState<'skip' | 'update'>('skip')
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     setErrors([])
@@ -56,15 +58,38 @@ export function ImportPage() {
     setSuccess('')
     try {
       if (backend) {
-        const result = await backend.invoke('import:batch', { rows: valid })
-        setSuccess(`成功导入 ${result.imported} 个商品，已生成批次和入库记录`)
+        const result = await backend.invoke('import:batch', { rows: valid, mode })
+        setSuccess(`导入完成：新增 ${result.imported} 个，更新 ${result.updated ?? 0} 个，跳过 ${result.skipped} 个`)
         setRows([])
         await loadAll()
       } else {
-        // 浏览器 mock 路径：逐个调用 addProduct + addInbound
+        // 浏览器 mock 路径：skip=已有 SKU 跳过；update=已有 SKU 只更新资料（不碰库存）
         let ok = 0
+        let updated = 0
+        let skipped = 0
         for (const r of valid) {
           try {
+            const existing = useAppStore.getState().products.find((p) => p.sku_code === r.sku_code)
+            if (existing) {
+              if (mode === 'skip') {
+                skipped++
+                continue
+              }
+              // 空着的列不动原值；SKU、库存数量、批次一律不碰（与后端 importBatch update 同口径）
+              const patch: Record<string, unknown> = {}
+              if (r.brand) patch.brand = r.brand
+              if (r.model) patch.model = r.model
+              if (r.cost_price != null) patch.cost_price = r.cost_price
+              if (r.suggest_price != null) patch.suggest_price = r.suggest_price
+              for (const f of ['rod_length', 'rod_action', 'power_rating', 'line_number', 'hook_size', 'color', 'material', 'expiry_date'] as const) {
+                if (r[f]) patch[f] = r[f]
+              }
+              if (Object.keys(patch).length > 0) {
+                await useAppStore.getState().updateProduct(existing.id, patch)
+              }
+              updated++
+              continue
+            }
             const p = await useAppStore.getState().addProduct({
               sku_code: r.sku_code,
               barcode: r.barcode ?? null,
@@ -100,7 +125,7 @@ export function ImportPage() {
             setErrors((prev) => [...prev, `${r.sku_code}: ${e.message}`])
           }
         }
-        setSuccess(`成功导入 ${ok}/${valid.length} 个商品`)
+        setSuccess(`导入完成：新增 ${ok} 个，更新 ${updated} 个，跳过 ${skipped} 个`)
         setRows([])
       }
     } catch (e: any) {
@@ -183,13 +208,54 @@ export function ImportPage() {
         </CardContent>
       </Card>
 
+      {/* 导入方式选择 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">2. 选择导入方式</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setMode('skip')}
+              className={`cursor-pointer rounded-lg border-2 px-4 py-3 text-left ${
+                mode === 'skip' ? 'border-brand-500 bg-brand-50' : 'border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="font-medium">只加新商品（已有的跳过）</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Excel 里和店里重复（SKU 一样）的商品保持原样，不会被动到。平时进货导入用这个。
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('update')}
+              className={`cursor-pointer rounded-lg border-2 px-4 py-3 text-left ${
+                mode === 'update' ? 'border-brand-500 bg-brand-50' : 'border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="font-medium">用 Excel 更新老商品（按 SKU 匹配）</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                SKU 一样的商品，按 Excel 覆盖品牌、型号、进价、售价和规格；新 SKU 仍会正常新增。
+              </div>
+            </button>
+          </div>
+          {mode === 'update' && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              注意：这会用 Excel 覆盖店里这些商品的价格和资料（进价、售价、品牌型号、规格等），
+              表里留空的列保持原样；<strong>库存数量不受影响</strong>。
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* 预览区 */}
       {rows.length > 0 && (
         <>
           <Card>
             <CardHeader className="flex-row items-center justify-between">
               <CardTitle className="text-base">
-                2. 预览导入数据（{rows.length} 条）
+                3. 预览导入数据（{rows.length} 条）
                 {validCount > 0 && (
                   <span className="ml-2 text-green-600">
                     <CheckCircle2 className="inline size-4" /> {validCount} 条有效
@@ -202,7 +268,7 @@ export function ImportPage() {
                 )}
                 {duplicateCount > 0 && (
                   <span className="ml-2 text-amber-600">
-                    {duplicateCount} 条SKU已存在（将跳过）
+                    {duplicateCount} 条SKU已存在（{mode === 'update' ? '将更新' : '将跳过'}）
                   </span>
                 )}
               </CardTitle>

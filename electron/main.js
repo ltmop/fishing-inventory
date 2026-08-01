@@ -1,8 +1,8 @@
 // 主进程：窗口生命周期 + 数据库装配 + IPC 注册 + 退出收尾
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { openDatabase, finalCheckpoint } from './db.js'
 import * as commands from './commands.js'
 import * as ai from './ai.js'
@@ -15,8 +15,16 @@ import { KWS_MODEL_NAME, ensureKwsModel } from './kwsModelManager.js'
 import { backupNow, backupNowAsync, scheduleDailyBackup, restoreBackup, backupStatus, loadBackupConfig, saveBackupExtraDir } from './backup.js'
 import * as feedback from './feedback.js'
 import { createInventoryServer } from './server.js'
+import { createPhotoStore } from './photo.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// 商品图片走自定义协议 fi-img://photo/<文件名>：file:// 页面直接 <img src> 指 %APPDATA% 绝对路径会被
+// file 协议拦；data URL 图片一多内存吃不消。standard+secure 让它能像 https 一样当图片源用。
+// 必须在 app ready 之前注册特权（模块顶层即可）
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'fi-img', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+])
 
 // 单实例：工控机/门店电脑上防止双击开出两个进程写同一个库
 if (!app.requestSingleInstanceLock()) {
@@ -30,6 +38,8 @@ const backupDir = path.join(dataDir, 'backup')
 // 第二备份位置配置（U 盘/网盘目录）：{ extraDir }，见 backup.js
 const backupConfigPath = path.join(dataDir, 'backup-config.json')
 const getExtraDir = () => loadBackupConfig(backupConfigPath).extraDir
+// 商品图片目录：<productId>.<ext>，读写与路径校验全在 photo.js（无 Electron 依赖，可单测）
+const photoStore = createPhotoStore(path.join(dataDir, 'images'))
 ai.initAi(dataDir)
 // 离线语音识别模型目录：首次启动后可经 voice:download 通道下载到本机
 const voiceModelDir = path.join(dataDir, 'models', MODEL_NAME)
@@ -104,10 +114,12 @@ function registerIpc() {
   handle('data:loadAll', (d) => commands.loadAll(d))
   handle('product:create', (d, p) => commands.createProduct(d, p))
   handle('product:update', (d, p) => commands.updateProduct(d, p.id, p))
+  handle('product:batchUpdate', (d, p) => commands.batchUpdateProducts(d, p))
   handle('product:delete', (d, p) => commands.deleteProduct(d, p.id, p.operator ?? null))
   handle('product:expiring', (d, p) => commands.expiringProducts(d, p))
   handle('inbound:create', (d, p) => commands.createInbound(d, p))
   handle('outbound:confirm', (d, p) => commands.confirmOutbound(d, p))
+  handle('outbound:checkout', (d, p) => commands.confirmCheckout(d, p))
   handle('outbound:return', (d, p) => commands.createReturn(d, p))
   handle('outbound:exchange', (d, p) => commands.createExchange(d, p))
   handle('supplier:create', (d, p) => commands.createSupplier(d, p))
@@ -125,6 +137,10 @@ function registerIpc() {
   handle('customer:list', (d) => commands.listCustomers(d))
   handle('customer:statement', (d, p) => commands.customerStatement(d, p))
   handle('payment:record', (d, p) => commands.recordPayment(d, p))
+  // 支出记账：记/改/删（列表随 data:loadAll 的 expenses 下发）
+  handle('expense:create', (d, p) => commands.createExpense(d, p))
+  handle('expense:update', (d, p) => commands.updateExpense(d, p))
+  handle('expense:delete', (d, p) => commands.deleteExpense(d, p))
   // 采购订单：建单/列表/详情/收货入库/取消
   handle('po:create', (d, p) => commands.createPurchaseOrder(d, p))
   handle('po:list', (d, p) => commands.listPurchaseOrders(d, p))
@@ -155,6 +171,18 @@ function registerIpc() {
   // 操作日志查询（可按 action 筛选）；供应商对账单
   handle('audit:list', (d, p) => commands.auditLog(d, p))
   handle('supplier:statement', (d, p) => commands.supplierStatement(d, p))
+  // 商品图片：渲染端已压好（选图后在 canvas 缩到 800px、JPEG 0.85 转 base64），这里只写盘，
+  // 返回相对文件名，前端再调 product:update 把它挂到 photo_path 上
+  ipcMain.handle('photo:save', (_e, p) => ({
+    ok: true,
+    path: photoStore.save(p?.productId, p?.base64, p?.ext ?? 'jpg'),
+  }))
+  // 删图一次做完两件事：删 images 目录里的文件 + 清掉商品上的 photo_path
+  ipcMain.handle('photo:delete', (_e, p) => {
+    photoStore.remove(p?.productId)
+    commands.updateProduct(db, p?.productId, { photo_path: null })
+    return { ok: true }
+  })
   // 从备份恢复：选文件 → 二次确认 → 覆盖 data.db → 重启应用让新库生效
   ipcMain.handle('backup:restore', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -311,6 +339,18 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // fi-img://photo/<文件名>：只放行 images 目录内文件（photo.js resolvePath 防路径穿越），
+  // 文件经 file URL 转交给 net.fetch，省得自己拼 mime/流
+  protocol.handle('fi-img', (request) => {
+    try {
+      const name = decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/, ''))
+      const abs = photoStore.resolvePath(name)
+      if (!abs || !fs.existsSync(abs)) return new Response('not found', { status: 404 })
+      return net.fetch(pathToFileURL(abs).toString())
+    } catch {
+      return new Response('bad request', { status: 400 })
+    }
+  })
   // 麦克风权限（按住说话/唤醒词监听用）：只对本应用自己的页面放行 'media'，其余一律拒绝
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const url = webContents.getURL()
@@ -336,7 +376,7 @@ app.whenReady().then(() => {
   ai.bindDb(db)
   registerIpc()
   // 手机看店服务：db 就绪后随备份调度一起启动；失败只告警不阻断桌面端
-  inventoryServer = createInventoryServer({ db, dataDir })
+  inventoryServer = createInventoryServer({ db, dataDir, webRoot: path.join(__dirname, '../dist') })
   inventoryServer.start().catch((e) => console.error('[server] 启动失败:', e))
   const stopScheduler = scheduleDailyBackup(db, dbPath, backupDir, (e) =>
     reportBackupError('自动备份失败', e),

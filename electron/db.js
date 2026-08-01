@@ -5,6 +5,14 @@
 import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import path from 'node:path'
+import {
+  SEED_SUPPLIERS,
+  SEED_PRODUCTS,
+  SEED_BATCHES,
+  SEED_TRANSACTIONS,
+  SEED_STOCK_TAKES,
+  SEED_STOCK_TAKE_ITEMS,
+} from './seedData.js'
 
 const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -88,7 +96,10 @@ CREATE TABLE IF NOT EXISTS transactions (
     -- 赊账包两列（老库由 migrateCreditPack 补）：customer_id 可空（散客），
     -- paid_amount=实收金额（分），NULL 视为已全额付清（老数据不动即为此语义）
     customer_id INTEGER REFERENCES customers(id),
-    paid_amount INTEGER
+    paid_amount INTEGER,
+    -- 收款方式（老库由 migratePayMethod 补）：现金/微信/支付宝/其他，
+    -- NULL=未记录（老数据/纯赊账/冲减欠款等没有现金移动的流水）
+    pay_method TEXT CHECK (pay_method IN ('现金','微信','支付宝','其他'))
 );
 
 CREATE TABLE IF NOT EXISTS stock_takes (
@@ -192,6 +203,23 @@ CREATE TABLE IF NOT EXISTS ai_insights (
     active INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 支出记账（v1.10）：进货付款/房租/水电/运费/人工/杂项，金额单位分；
+-- 净利 = 毛利 − 支出（经营报表口径）。老库靠 CREATE TABLE IF NOT EXISTS 直接建表，无需迁移
+CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL CHECK (category IN ('进货付款','房租','水电','运费','人工','杂项')),
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    method TEXT NOT NULL DEFAULT '现金' CHECK (method IN ('现金','微信','支付宝','其他')),
+    supplier_id INTEGER REFERENCES suppliers(id),
+    note TEXT,
+    -- 支出发生的本地日期 YYYY-MM-DD（老板补记昨天的账也能记对日子）
+    expense_date TEXT NOT NULL,
+    operator TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
 `
 
 /**
@@ -218,6 +246,7 @@ export function openDatabase(dbPath) {
   migrateFishingAttrs(db)
   migrateCustomerPriceLevel(db)
   migrateMinStock(db)
+  migratePayMethod(db)
   const row = db.prepare('SELECT COUNT(*) AS n FROM products').get()
   if (row.n === 0) seedDatabase(db)
   return db
@@ -343,6 +372,14 @@ function migrateMinStock(db) {
   if (!cols.includes('min_stock')) db.exec('ALTER TABLE products ADD COLUMN min_stock INTEGER')
 }
 
+// ---------- 收款方式迁移：老库 transactions 补 pay_method（只增不改；NULL=未记录） ----------
+function migratePayMethod(db) {
+  const cols = db.prepare('PRAGMA table_info(transactions)').all().map((c) => c.name)
+  if (!cols.includes('pay_method')) {
+    db.exec("ALTER TABLE transactions ADD COLUMN pay_method TEXT CHECK (pay_method IN ('现金','微信','支付宝','其他'))")
+  }
+}
+
 /** 软件正常退出时调用一次：收尾 checkpoint，截断 WAL */
 export function finalCheckpoint(db) {
   try {
@@ -429,87 +466,13 @@ function daysAgo(n, hour = 10, minute = 0) {
 const dateDaysAgo = (n) => daysAgo(n).slice(0, 10)
 
 function seedDatabase(db) {
-  const suppliers = [
-    ['威海光威渔具集团', '王经理', '0631-5628888', '山东省威海市环翠区渔具产业园', '月结30天，主打台钓竿'],
-    ['广州钓之屋商贸', '陈小姐', '020-83456789', '广州市荔湾区芳村渔具批发市场A12', '路亚饵/鱼钩走量大'],
-    ['宁波海伯渔具', '李工', '0574-87654321', '宁波市北仑区小港街道工业园区', '渔轮一级代理'],
-    ['肃宁浮漂世家', '赵老板', '0317-5012345', '河北省沧州市肃宁县浮漂产业园', '手工浮漂，起订量50支'],
-  ]
-  // [sku, barcode, category, sub_category, brand, model, cost, suggest, location, status, createdDaysAgo, updatedDaysAgo]
-  const products = [
-    ['JC-FG-SG-GW-36', '6923456789012', '鱼竿', '手竿', '光威', '赤刃 3.6m 28调', 4200, 8500, 'A区-东墙-第2层', '已盘点', 30, 2],
-    ['JC-FG-SG-HS-45', '6923456789029', '鱼竿', '手竿', '化氏', '一味 4.5m 28调', 6800, 12800, 'A区-东墙-第3层', '已盘点', 28, 5],
-    ['JC-FG-LY-DYW-21', '6923456789036', '鱼竿', '路亚竿', '达亿瓦', '一击 2.1m ML调 枪柄', 15500, 26800, 'A区-西墙-第1层', '已上架虾皮', 25, 3],
-    ['JC-FG-HG-LW-30', '6923456789043', '鱼竿', '海竿', '狼王', '远投 3.0m', 5500, 9900, 'B区-1号柜', '待盘点', 22, 8],
-    ['JC-YL-FC-XMN-2500', '6923456789050', '渔轮', '纺车轮', '禧玛诺', '纳西 2500HG', 32000, 49800, 'B区-3号柜', '已上架虾皮', 20, 1],
-    ['JC-YL-SD-AB-001', '6923456789067', '渔轮', '水滴轮', '阿布加西亚', 'BMAX3 右握', 21000, 33800, 'B区-3号柜', '待盘点', 18, 6],
-    ['JC-XL-PE-YGK-1.5', '6923456789074', '鱼线', 'PE线', 'YGK', 'PE线 1.5号 200m', 1800, 3500, 'C区-线材架-第1层', '已盘点', 15, 2],
-    ['JC-JL-MN-MB-009', '6923456789081', '路亚假饵', '米诺', 'Megabass', '米诺 9cm 金鳞', 1200, 2800, 'C区-饵盒-A3', '已上架虾皮', 15, 4],
-    ['JC-YG-YS-TFF-05', '6923456789098', '鱼钩', '伊势尼', '土肥富', '伊势尼 5号 10枚装', 300, 800, 'C区-钩架-第2层', '已盘点', 14, 7],
-    ['JC-FP-LP-AL-001', '6923456789104', '浮漂', '立漂', '阿卢', '巴尔杉木 LPA-01 3#', 800, 1800, 'C区-漂盒-B1', '待盘点', 12, 3],
-    ['JC-WL-CW-LQ-21', '6923456789111', '渔网', '抄网', '连球', '折叠抄网 2.1m', 2500, 4800, 'B区-2号柜', '已盘点', 10, 9],
-    ['JC-SP-YS-JDN-22', '6923456789128', '伞/遮阳', '钓鱼伞', '佳钓尼', '钓鱼伞 2.2m 万向', 4500, 7900, 'D区-大件区', '已售罄', 40, 10],
-  ]
-  // [product_id, batch_no, qty, cost, location, inboundDaysAgo, supplier_id]
-  const batches = [
-    [1, 'PO20260710-001', 8, 4200, 'A区-东墙-第2层', 18, 1],
-    [1, 'PO20260720-002', 4, 4500, 'A区-东墙-第2层', 8, 1],
-    [2, 'PO20260712-001', 3, 6800, 'A区-东墙-第3层', 16, 1],
-    [3, 'PO20260714-001', 6, 15500, 'A区-西墙-第1层', 14, 3],
-    [4, 'PO20260708-001', 9, 5500, 'B区-1号柜', 20, 1],
-    [5, 'PO20260705-001', 2, 32000, 'B区-3号柜', 23, 3],
-    [5, 'PO20260718-003', 3, 31800, 'B区-3号柜', 10, 3],
-    [6, 'PO20260716-001', 4, 21000, 'B区-3号柜', 12, 3],
-    [7, 'PO20260711-004', 25, 1800, 'C区-线材架-第1层', 17, 2],
-    [7, 'PO20260722-001', 20, 1750, 'C区-线材架-第1层', 6, 2],
-    [8, 'PO20260713-002', 35, 1200, 'C区-饵盒-A3', 15, 2],
-    [8, 'PO20260724-005', 25, 1150, 'C区-饵盒-A3', 4, 2],
-    [9, 'PO20260709-003', 30, 300, 'C区-钩架-第2层', 19, 2],
-    [9, 'PO20260721-006', 17, 320, 'C区-钩架-第2层', 7, 2],
-    [10, 'PO20260715-001', 30, 800, 'C区-漂盒-B1', 13, 4],
-    [11, 'PO20260717-002', 2, 2500, 'B区-2号柜', 11, 1],
-  ]
-  // 出库流水 unit_price=批次成本价、selling_price=实际售价（最终 schema 约定）
-  // [product_id, batch_id, type, qty, unit_price, selling_price, daysBack, hour, operator, notes]
-  const txs = [
-    [1, 1, 'out', 2, 4200, 8500, 6, 11, '阿杜', null],
-    [7, 9, 'out', 5, 1800, 3500, 6, 15, '店员小李', null],
-    [9, 13, 'out', 10, 300, 800, 5, 10, '店员小李', null],
-    [11, 16, 'in', 2, 2500, null, 5, 14, '阿杜', '连球补货'],
-    [5, 6, 'out', 1, 32000, 49800, 4, 16, '阿杜', null],
-    [8, 11, 'out', 8, 1200, 2800, 3, 9, '店员小李', null],
-    [12, null, 'return', 1, 7900, null, 3, 17, '阿杜', '客户退货：伞骨弯'],
-    [1, 2, 'out', 1, 4500, 8500, 2, 14, '店员小李', null],
-    [7, 10, 'in', 20, 1750, null, 2, 10, '阿杜', 'YGK 补货'],
-    [9, 14, 'out', 6, 320, 800, 1, 11, '店员小李', null],
-    [3, 4, 'out', 1, 15500, 26800, 1, 16, '阿杜', null],
-    [8, 12, 'out', 3, 1150, 2800, 0, 9, '店员小李', null],
-    [7, 10, 'out', 2, 1750, 3500, 0, 10, '店员小李', null],
-    [10, 15, 'in', 30, 800, null, 0, 11, '阿杜', '阿卢浮漂到货'],
-    // ---- 90 天前的历史流水（让滞销统计、长期趋势和退货/换货报表都有据可依） ----
-    [2, 3, 'in', 3, 6800, null, 95, 10, '阿杜', '早期进货'],
-    [1, 1, 'out', 3, 4200, 8500, 92, 15, '阿杜', null],
-    [7, 9, 'out', 10, 1800, 3500, 91, 11, '店员小李', null],
-    [9, 13, 'out', 20, 300, 800, 90, 16, '阿杜', null],
-    [5, 6, 'return', 1, 32000, 49800, 90, 14, '阿杜', '退货回补'],
-    [8, 11, 'return', 2, 1200, null, 89, 10, '阿杜', '换货退旧'],
-    [1, 1, 'out', 2, 4200, 8500, 89, 10, '阿杜', '换货出新'],
-  ]
-  const stockTakes = [
-    // [take_no, status, location_filter, startedDaysAgo, startedHour, completedDaysAgo, completedHour, operator]
-    ['ST20260720-001', '已完成', null, 8, 10, 8, 17, '阿杜'],
-    ['ST20260728-001', '进行中', 'A区', 0, 10, null, null, '店员小李'],
-  ]
-  // [stock_take_id, product_id, batch_id, system_qty, actual_qty, reason]
-  const stockTakeItems = [
-    [1, 1, 1, 10, 10, ''],
-    [1, 5, 6, 3, 2, '样机损耗'],
-    [1, 9, 13, 38, 40, '漏记入库'],
-    [2, 1, 1, 8, null, ''],
-    [2, 1, 2, 4, null, ''],
-    [2, 2, 3, 3, null, ''],
-    [2, 3, 4, 6, null, ''],
-  ]
+  // 数据定义已抽取到 electron/seedData.js（索引即新库自增 id：空库从 1 开始连续插入）
+  const suppliers = SEED_SUPPLIERS
+  const products = SEED_PRODUCTS
+  const batches = SEED_BATCHES
+  const txs = SEED_TRANSACTIONS
+  const stockTakes = SEED_STOCK_TAKES
+  const stockTakeItems = SEED_STOCK_TAKE_ITEMS
 
   db.exec('BEGIN')
   try {

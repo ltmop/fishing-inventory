@@ -20,6 +20,18 @@ export function assertFen(v, name) {
   }
 }
 
+// 收款方式白名单（出库收款 / 退货退款 / 客户还款共用）
+export const PAYMENT_METHODS = ['现金', '微信', '支付宝', '其他']
+
+/** 校验收款方式：null/undefined 放行（表示未记录），给了必须在白名单里 */
+export function assertPayMethod(v, name = '收款方式') {
+  if (v == null) return null
+  if (!PAYMENT_METHODS.includes(v)) {
+    throw new Error(`${name}必须是：${PAYMENT_METHODS.join(' / ')}，收到：${v}`)
+  }
+  return v
+}
+
 /** 最低库存预警线归一：留空/null → NULL（用默认阈值 5），否则必须是非负整数 */
 function minStockOrNull(v) {
   if (v == null || v === '') return null
@@ -139,6 +151,7 @@ export function loadAll(db) {
     stockTakes: q('SELECT * FROM stock_takes ORDER BY id DESC'),
     stockTakeItems: q('SELECT * FROM stock_take_items ORDER BY id'),
     priceTiers: q('SELECT * FROM price_tiers ORDER BY product_id, id'),
+    expenses: q('SELECT * FROM expenses ORDER BY expense_date DESC, id DESC'),
   }
 }
 
@@ -207,7 +220,7 @@ export function updateProduct(db, id, input) {
   const minStock = minStockOrNull(v.min_stock)
   return inTransaction(db, () => {
     db.prepare(
-      `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, min_stock = ?, updated_at = ?
+      `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, min_stock = ?, photo_path = ?, updated_at = ?
        WHERE id = ?`,
     ).run(
       v.category,
@@ -220,6 +233,8 @@ export function updateProduct(db, id, input) {
       v.status ?? '待盘点',
       ...SPEC_FIELDS.map((f) => specOrNull(v[f])),
       minStock,
+      // 图片相对文件名（images 目录内）；与现有行合并，不传 photo_path 时保持原值
+      v.photo_path ?? null,
       now(),
       id,
     )
@@ -231,6 +246,8 @@ export function updateProduct(db, id, input) {
 
 /** 仅允许删除没有任何批次和流水的商品，防止库存历史断链 */
 export function deleteProduct(db, id, operator = null) {
+  const exists = db.prepare('SELECT 1 FROM products WHERE id = ?').get(id)
+  if (!exists) return { ok: false, reason: '商品不存在或已被删除' }
   const batchCount = db.prepare('SELECT COUNT(*) AS n FROM inventory_batches WHERE product_id = ?').get(id).n
   const txCount = db.prepare('SELECT COUNT(*) AS n FROM transactions WHERE product_id = ?').get(id).n
   if (batchCount > 0 || txCount > 0) {
@@ -241,6 +258,77 @@ export function deleteProduct(db, id, operator = null) {
     db.prepare('DELETE FROM products WHERE id = ?').run(id)
     if (cur) logAudit(db, '删商品', productLabel(cur), { sku: cur.sku_code }, operator)
     return { ok: true }
+  })
+}
+
+// 商品状态枚举（与 schema CHECK 一致）
+const PRODUCT_STATUSES = ['待盘点', '已盘点', '已上架虾皮', '已售罄', '停产']
+
+/**
+ * 批量修改商品：一次事务改一批商品的价格/状态，两者至少传一个。
+ * priceMode（可省，二选一）：
+ *   { kind: 'ratio', ratio } 统一打折：建议售价与"已设"的各档价格 ×ratio，
+ *     分单位四舍五入（最低 1 分，防止打成 0）；没设建议售价/没设档次的保持原样（不补建档次）。
+ *   { kind: 'fixed', priceFen } 统一改价：建议售价与已设的各档价格都改成 priceFen。
+ * status（可省）：批量改状态，限 5 态之一。
+ * 任一商品 id 不存在直接报错、整批回滚（不留半截修改）；
+ * 价格/状态各记一条 audit_log（"批量改价 N 个商品"），与写入同事务。
+ */
+export function batchUpdateProducts(db, { ids, priceMode, status, operator }) {
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error('批量修改的商品列表不能为空')
+  if (priceMode == null && status == null) throw new Error('批量修改至少要做一件事（改价或改状态）')
+  if (priceMode != null) {
+    if (priceMode.kind === 'ratio') {
+      if (typeof priceMode.ratio !== 'number' || !Number.isFinite(priceMode.ratio) || priceMode.ratio <= 0) {
+        throw new Error(`折扣必须是大于 0 的数字（如 0.9 表示 9 折），收到：${priceMode.ratio}`)
+      }
+    } else if (priceMode.kind === 'fixed') {
+      assertPositiveInt(priceMode.priceFen, '统一售价')
+    } else {
+      throw new Error(`批量改价方式必须是 ratio（打折）或 fixed（统一价），收到：${priceMode.kind}`)
+    }
+  }
+  if (status != null && !PRODUCT_STATUSES.includes(status)) {
+    throw new Error(`状态必须是：${PRODUCT_STATUSES.join(' / ')}，收到：${status}`)
+  }
+  return inTransaction(db, () => {
+    const ts = now()
+    let tiersUpdated = 0
+    for (const id of ids) {
+      const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(id)
+      if (!prod) throw new Error(`商品不存在（ID：${id}）`)
+      if (priceMode != null) {
+        const convert = (p) =>
+          priceMode.kind === 'ratio' ? Math.max(1, Math.round(p * priceMode.ratio)) : priceMode.priceFen
+        db.prepare('UPDATE products SET suggest_price = ?, updated_at = ? WHERE id = ?').run(
+          prod.suggest_price == null ? null : convert(prod.suggest_price),
+          ts,
+          id,
+        )
+        // 只动"已设"的档次价；没设档的商品不补建
+        const tiers = db.prepare('SELECT * FROM price_tiers WHERE product_id = ?').all(id)
+        for (const t of tiers) {
+          db.prepare('UPDATE price_tiers SET price = ? WHERE id = ?').run(convert(t.price), t.id)
+          tiersUpdated++
+        }
+      }
+      if (status != null) {
+        db.prepare('UPDATE products SET status = ?, updated_at = ? WHERE id = ?').run(status, ts, id)
+      }
+    }
+    if (priceMode != null) {
+      logAudit(db, '批量改价', `批量改价 ${ids.length} 个商品`, {
+        count: ids.length,
+        mode: priceMode.kind,
+        ratio: priceMode.kind === 'ratio' ? priceMode.ratio : null,
+        priceFen: priceMode.kind === 'fixed' ? priceMode.priceFen : null,
+        tiersUpdated,
+      }, operator)
+    }
+    if (status != null) {
+      logAudit(db, '批量改状态', `批量改状态 ${ids.length} 个商品 → ${status}`, { count: ids.length, status }, operator)
+    }
+    return { ok: true, updated: ids.length, tiersUpdated }
   })
 }
 
@@ -294,11 +382,15 @@ export function createInbound(db, { productId, quantity, costPrice, location, su
  * 售价取值优先级：显式 sellingPrice > 该商品 tier 档次价 > 商品建议零售价（仅传了 tier 时才回退）。
  * 传了 tier 但该商品没设该档 → 回退 suggest_price（没有则记 NULL，前端应手填）；
  * 不传 tier → 行为与旧版完全一致。赊账/客户逻辑在售价定下来之后走，不受影响。
+ * 收款方式扩展：payMethod 可选（现金/微信/支付宝/其他）。只有真正收到钱时才落库——
+ * 全额付清记各条流水；部分付款且实收>0 同样记；纯赊账（paidAmount=0）强制记 NULL（没有现金移动）。
+ * 老数据/未传的一律 NULL=未记录，日结拆分单独归入"未记录"。
  */
-export function confirmOutbound(db, { productId, quantity, sellingPrice, operator, customerId, paidAmount, tier }) {
+export function confirmOutbound(db, { productId, quantity, sellingPrice, operator, customerId, paidAmount, tier, payMethod }) {
   // 入口先校验：数量为 0/负数时直接抛错，不再静默返回 { ok: true, allocations: [] }
   assertPositiveInt(quantity, '出库数量')
   if (sellingPrice != null) assertFen(sellingPrice, '出库售价')
+  payMethod = assertPayMethod(payMethod)
   if (tier != null) {
     if (!PRICE_TIERS.includes(tier)) throw new Error(`价格档次必须是：${PRICE_TIERS.join(' / ')}，收到：${tier}`)
     if (sellingPrice == null) {
@@ -339,6 +431,8 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
     const totalDue = sellingPrice != null ? quantity * sellingPrice : null
     // 是否赊账单（部分付款/纯赊账）：只有赊账单才往 paid_amount 写实收，否则保持 NULL=全额付清
     const isCredit = totalDue != null && paidAmount != null && paidAmount < totalDue
+    // 纯赊账没有现金移动，收款方式强制落空；部分付款实收>0 / 全额付清才记方式
+    const methodForTx = isCredit && paidAmount === 0 ? null : payMethod
     let paidLeft = isCredit ? paidAmount : 0
     const allocations = []
     let remaining = quantity
@@ -354,9 +448,9 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
         paidLeft -= paid
       }
       db.prepare(
-        `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount)
-         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, NULL, ?, ?)`,
-      ).run(productId, b.id, deduct, b.cost_price, sellingPrice ?? null, ts, operator ?? null, customerId ?? null, paid)
+        `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount, pay_method)
+         VALUES (?, ?, 'out', ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+      ).run(productId, b.id, deduct, b.cost_price, sellingPrice ?? null, ts, operator ?? null, customerId ?? null, paid, methodForTx)
       allocations.push({
         batch_id: b.id,
         batch_no: b.batch_no,
@@ -372,6 +466,108 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
     return {
       ok: true,
       allocations,
+      totalDue,
+      paidAmount: isCredit ? paidAmount : null,
+      creditAmount: isCredit ? totalDue - paidAmount : 0,
+    }
+  })
+}
+
+/**
+ * 一单多商品收银台：一次开单出多种商品，所有行在同一事务里——
+ * 任一行库存不足或校验失败，整单回滚不留半截（与盘点提交同原则）。
+ * 行项目：{ productId, quantity, sellingPrice }，每行售价必填且 >0（收银台营业额/毛利全靠它）。
+ * 收款口径与 confirmOutbound 一致：paidAmount 省略=全额付清（流水 paid_amount 记 NULL）；
+ * 不满额=赊账必须选客户，实收按行顺序 + 行内 FIFO 逐条摊销；纯赊账（0）没有现金移动，pay_method 强制 NULL。
+ * 返回 { ok, lines:[{productId, quantity, sellingPrice, allocations}], totalDue, paidAmount, creditAmount }
+ * 或 { ok:false, shortages:[{productId, name, shortage}] }（哪几个商品不够、各差多少，一次说清）
+ */
+export function confirmCheckout(db, { items, customerId, paidAmount, payMethod, operator }) {
+  if (!Array.isArray(items) || items.length === 0) throw new Error('开单商品列表不能为空')
+  if (items.length > 50) throw new Error(`一单最多 50 种商品，收到：${items.length}`)
+  payMethod = assertPayMethod(payMethod)
+  const lines = items.map((it, i) => {
+    assertPositiveInt(it.quantity, `第 ${i + 1} 行数量`)
+    if (!Number.isInteger(it.sellingPrice) || it.sellingPrice <= 0) {
+      throw new Error(`第 ${i + 1} 行售价必须大于 0（单位：分），收到：${it.sellingPrice}`)
+    }
+    return { productId: it.productId, quantity: it.quantity, sellingPrice: it.sellingPrice, due: it.quantity * it.sellingPrice }
+  })
+  const totalDue = lines.reduce((s, l) => s + l.due, 0)
+  if (paidAmount != null) {
+    assertFen(paidAmount, '实收金额')
+    if (paidAmount > totalDue) throw new Error(`实收金额不能超过应付总额（应付 ${totalDue} 分，实收 ${paidAmount} 分）`)
+    if (paidAmount < totalDue && customerId == null) throw new Error('赊账必须选客户')
+  }
+  return inTransaction(db, () => {
+    if (customerId != null) {
+      const cust = db.prepare('SELECT id FROM customers WHERE id = ?').get(customerId)
+      if (!cust) throw new Error('客户不存在')
+    }
+    // 先全部查库存（不改数据），不够的商品一次列清，收银员知道该从单子里拿掉哪样
+    const planRows = []
+    const shortages = []
+    for (const l of lines) {
+      const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(l.productId)
+      if (!prod) throw new Error(`商品不存在（ID：${l.productId}）`)
+      const batches = db
+        .prepare(
+          `SELECT * FROM inventory_batches
+           WHERE product_id = ? AND quantity > 0
+           ORDER BY inbound_date ASC, id ASC`,
+        )
+        .all(l.productId)
+      const total = batches.reduce((s, b) => s + b.quantity, 0)
+      if (total < l.quantity) {
+        shortages.push({ productId: l.productId, name: productLabel(prod), shortage: l.quantity - total })
+      }
+      planRows.push({ line: l, batches })
+    }
+    if (shortages.length > 0) return { ok: false, shortages }
+    const ts = now()
+    const isCredit = paidAmount != null && paidAmount < totalDue
+    // 纯赊账没有现金移动，收款方式强制落空；全额/部分收款才记方式
+    const methodForTx = isCredit && paidAmount === 0 ? null : payMethod
+    let paidLeft = isCredit ? paidAmount : 0
+    const resultLines = []
+    for (const { line: l, batches } of planRows) {
+      let remaining = l.quantity
+      const allocations = []
+      for (const b of batches) {
+        if (remaining <= 0) break
+        const deduct = Math.min(b.quantity, remaining)
+        db.prepare('UPDATE inventory_batches SET quantity = ? WHERE id = ?').run(b.quantity - deduct, b.id)
+        // 实收按行顺序 + 行内 FIFO 摊销到每条流水；未覆盖到的记 0（赊的那段）
+        let paid = null
+        if (isCredit) {
+          paid = Math.min(deduct * l.sellingPrice, paidLeft)
+          paidLeft -= paid
+        }
+        db.prepare(
+          `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount, pay_method)
+           VALUES (?, ?, 'out', ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+        ).run(l.productId, b.id, deduct, b.cost_price, l.sellingPrice, ts, operator ?? null, customerId ?? null, paid, methodForTx)
+        allocations.push({ batch_id: b.id, batch_no: b.batch_no, deduct, remaining_after: b.quantity - deduct, cost_price: b.cost_price })
+        remaining -= deduct
+      }
+      resultLines.push({ productId: l.productId, quantity: l.quantity, sellingPrice: l.sellingPrice, allocations })
+    }
+    const names = resultLines
+      .map((rl) => {
+        const p = db.prepare('SELECT * FROM products WHERE id = ?').get(rl.productId)
+        return `${p ? productLabel(p) : `#${rl.productId}`} x${rl.quantity}`
+      })
+      .join('，')
+    logAudit(
+      db,
+      '收银开单',
+      `${resultLines.length} 种商品：${names}`,
+      { itemCount: resultLines.length, totalDue, paidAmount: isCredit ? paidAmount : null, creditAmount: isCredit ? totalDue - paidAmount : 0, customerId: customerId ?? null },
+      operator,
+    )
+    return {
+      ok: true,
+      lines: resultLines,
       totalDue,
       paidAmount: isCredit ? paidAmount : null,
       creditAmount: isCredit ? totalDue - paidAmount : 0,
@@ -420,10 +616,13 @@ function addBackToLatestBatch(db, productId, quantity) {
  * 前端传 customerId，退货流水记 customer_id、paid_amount 记 NULL，
  * 欠款计算时 return 类型按 quantity*selling_price 以负数计入该客户的赊销合计。
  * 已全额收款的退货不要传 customerId（退的是现金，与赊账余额无关）。
+ * 退款方式扩展：payMethod 可选（现金/微信/支付宝/其他）。只有真退钱（不传 customerId）才落库；
+ * 冲减欠款的退货没有现金移动，pay_method 强制记 NULL。
  */
-export function createReturn(db, { productId, quantity, refundPrice, operator, customerId }) {
+export function createReturn(db, { productId, quantity, refundPrice, operator, customerId, payMethod }) {
   assertPositiveInt(quantity, '退货数量')
   if (refundPrice != null) assertFen(refundPrice, '退款金额')
+  payMethod = assertPayMethod(payMethod, '退款方式')
   return inTransaction(db, () => {
     if (customerId != null) {
       const cust = db.prepare('SELECT id FROM customers WHERE id = ?').get(customerId)
@@ -432,9 +631,9 @@ export function createReturn(db, { productId, quantity, refundPrice, operator, c
     const ts = now()
     const { batchId, unitCost } = addBackToLatestBatch(db, productId, quantity)
     db.prepare(
-      `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount)
-       VALUES (?, ?, 'return', ?, ?, ?, ?, ?, '退货回补', ?, NULL)`,
-    ).run(productId, batchId, quantity, unitCost, refundPrice ?? null, ts, operator ?? null, customerId ?? null)
+      `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount, pay_method)
+       VALUES (?, ?, 'return', ?, ?, ?, ?, ?, '退货回补', ?, NULL, ?)`,
+    ).run(productId, batchId, quantity, unitCost, refundPrice ?? null, ts, operator ?? null, customerId ?? null, customerId == null ? payMethod : null)
     const retProd = db.prepare('SELECT * FROM products WHERE id = ?').get(productId)
     logAudit(db, '退货', `${retProd ? productLabel(retProd) : `#${productId}`} x${quantity}`,
       { quantity, refundPrice: refundPrice ?? null, customerId: customerId ?? null }, operator)
@@ -626,8 +825,6 @@ export function deleteSupplier(db, id) {
 //   · exchange 流水=换货退差价（见 createExchange）：paid_amount 为负退款额，记了 customer_id
 //     的就是冲减欠款（负贡献），退现金的记 customer_id=NULL 天然不纳入
 //   当前欠款 outstanding = 赊销净额 - 还款累计；允许为负，负值即预收（老板多收/先收的钱）
-
-const PAYMENT_METHODS = ['现金', '微信', '支付宝', '其他']
 
 /** 单个客户的赊销净额（分）：out 未付部分 - return 冲减 + exchange 退差价冲减 */
 function netCreditOf(db, customerId) {
@@ -1159,19 +1356,33 @@ export function getPriceTiers(db, { productId }) {
 /**
  * 批量导入商品 + 批次，每条商品自动生成批次入库记录。
  * 逐行校验：坏行（数量非法、缺成本价、品类不在 20 大类内）记入 errors 并跳过该行，
- * 不再让一行坏数据导致整批回滚；已存在的 SKU 同样跳过（含本次导入内部的重复行）。
+ * 不再让一行坏数据导致整批回滚。
  * SKU 规则与手动新建一致：显式 SKU 原样用 > 有条码用条码 > 无条码自动编纯数字号（1001 起）。
  * 合法行仍在同一事务里整体提交，批次号与手动入库同规则。
- * @param {{ rows: Array<{sku_code?, barcode?, category, sub_category?, brand?, model?, cost_price, suggest_price?, quantity, location?, operator?, rod_length?, rod_action?, power_rating?, line_number?, hook_size?, color?, material?, expiry_date?}> }} input
+ *
+ * mode：
+ * - 'skip'（默认，向后兼容）：已存在的 SKU 跳过（含本次导入内部的重复行）。
+ * - 'update'：SKU 已存在 → 更新该商品的可写字段（品牌/型号/成本价/建议售价/规格/状态/min_stock；
+ *   SKU 本身、库存数量、批次一律不动），表里留空的列保持原值不覆盖；
+ *   SKU 不存在 → 照常按新商品导入（带批次入库）。更新记一条 audit_log（"Excel 更新 N 个商品"）。
+ * 返回 { ok, imported, updated, skipped, results, errors }。
+ * @param {{ rows: Array<{sku_code?, barcode?, category, sub_category?, brand?, model?, cost_price, suggest_price?, quantity, location?, operator?, rod_length?, rod_action?, power_rating?, line_number?, hook_size?, color?, material?, expiry_date?, status?, min_stock?}>, mode?: 'skip' | 'update' }} input
  */
-export function importBatch(db, { rows }) {
+export function importBatch(db, { rows, mode = 'skip' }) {
+  if (mode !== 'skip' && mode !== 'update') {
+    throw new Error(`导入模式必须是 skip（只加新商品）或 update（更新老商品），收到：${mode}`)
+  }
   return inTransaction(db, () => {
     const ts = now()
     // 先过滤已存在的 SKU（含本次导入内部的重复行）
-    const existing = new Set(
-      db.prepare('SELECT sku_code FROM products').all().map((r) => r.sku_code),
+    const prodBySku = new Map(
+      db.prepare('SELECT * FROM products').all().map((r) => [r.sku_code, r]),
     )
+    const existing = new Set(prodBySku.keys())
+    // 本次导入已处理的 SKU：文件内部重复行只处理第一次（update 模式也只更新一次）
+    const seenInFile = new Set()
     const newRows = []
+    const updateRows = []
     const errors = []
     let skipped = 0
     for (const [i, r] of rows.entries()) {
@@ -1187,10 +1398,20 @@ export function importBatch(db, { rows }) {
       }
       // SKU：显式 > 条码 > 纯数字自动编号（existing 兼作本次导入的已占用编号集合）
       let sku = r.sku_code?.trim() || r.barcode?.trim() || nextNumericSku(db, existing)
-      if (existing.has(sku)) {
-        skipped++
+      if (seenInFile.has(sku)) {
+        skipped++ // 文件内部重复
+      } else if (existing.has(sku)) {
+        // update 模式且是店里已有的 SKU → 更新老商品；其余（skip 模式）跳过
+        const prod = prodBySku.get(sku)
+        if (mode === 'update' && prod) {
+          updateRows.push({ ...r, sku_code: sku, __product: prod })
+          seenInFile.add(sku)
+        } else {
+          skipped++
+        }
       } else {
         existing.add(sku)
+        seenInFile.add(sku)
         newRows.push({ ...r, sku_code: sku })
       }
     }
@@ -1223,7 +1444,39 @@ export function importBatch(db, { rows }) {
       insTx.run(productId, batchId, qty, r.cost_price, ts, r.operator ?? '导入')
       results.push({ productId, batchId, batchNo, sku_code: r.sku_code })
     }
-    return { ok: true, imported: results.length, skipped, results }
+
+    // update 模式：按 SKU 匹配更新老商品资料。空着的列不动原值；SKU/库存/批次一律不碰。
+    const updatedSkus = []
+    for (const r of updateRows) {
+      const prod = r.__product
+      const upd = {}
+      if (r.brand != null && String(r.brand).trim() !== '') upd.brand = String(r.brand).trim()
+      if (r.model != null && String(r.model).trim() !== '') upd.model = String(r.model).trim()
+      if (r.cost_price != null) upd.cost_price = r.cost_price
+      if (r.suggest_price != null) upd.suggest_price = r.suggest_price
+      for (const f of SPEC_FIELDS) {
+        const v = specOrNull(r[f])
+        if (v != null) upd[f] = v
+      }
+      if (r.status != null) {
+        if (!PRODUCT_STATUSES.includes(r.status)) {
+          throw new Error(`状态必须是：${PRODUCT_STATUSES.join(' / ')}，收到：${r.status}（SKU：${r.sku_code}）`)
+        }
+        upd.status = r.status
+      }
+      if (r.min_stock != null) upd.min_stock = minStockOrNull(r.min_stock)
+      const keys = Object.keys(upd)
+      if (keys.length > 0) {
+        db.prepare(
+          `UPDATE products SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`,
+        ).run(...keys.map((k) => upd[k]), ts, prod.id)
+      }
+      updatedSkus.push(r.sku_code)
+    }
+    if (updatedSkus.length > 0) {
+      logAudit(db, 'Excel更新', `Excel 更新 ${updatedSkus.length} 个商品`, { updated: updatedSkus.length, skus: updatedSkus }, rows[0]?.operator ?? '导入')
+    }
+    return { ok: true, imported: results.length, updated: updatedSkus.length, skipped, results, errors }
   })
 }
 
@@ -1246,6 +1499,43 @@ export function lowStockProducts(db) {
        ORDER BY stock ASC, p.id ASC`,
     )
     .all(DEFAULT_MIN_STOCK, DEFAULT_MIN_STOCK)
+}
+
+// ---------- 今日收款方式拆分（日结对账用） ----------
+
+/**
+ * 今日收款方式拆分（单位：分），桌面仪表盘与手机看店共用同一口径：
+ * - byMethod：按流水 pay_method 聚合——出库实收记正、退货退款记负（换货退旧腿、冲减欠款的退货不算现金移动）
+ * - unrecorded：收到钱但没记方式的净额（老数据/未选方式）
+ * - credit：今日新增赊账（应付 − 实收）
+ */
+export function todayPaymentSplit(db) {
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const rows = db
+    .prepare(
+      `SELECT type, quantity, selling_price, paid_amount, pay_method, notes FROM transactions
+       WHERE timestamp >= ? AND selling_price IS NOT NULL AND type IN ('out', 'return')`,
+    )
+    .all(start.toISOString())
+  const byMethod = {}
+  let unrecorded = 0
+  let credit = 0
+  for (const t of rows) {
+    if (t.type === 'return') {
+      if (t.notes === '换货退旧' || t.pay_method == null) continue
+      byMethod[t.pay_method] = (byMethod[t.pay_method] ?? 0) - t.quantity * t.selling_price
+      continue
+    }
+    const due = t.quantity * t.selling_price
+    const paid = t.paid_amount == null ? due : t.paid_amount // NULL=全额付清
+    credit += due - paid
+    if (paid > 0) {
+      if (t.pay_method == null) unrecorded += paid
+      else byMethod[t.pay_method] = (byMethod[t.pay_method] ?? 0) + paid
+    }
+  }
+  return { byMethod, unrecorded, credit }
 }
 
 // ---------- 过期预警（饵料等保质期商品） ----------
@@ -1358,4 +1648,122 @@ export function supplierStatement(db, { supplierId }) {
     lastInboundAt: lines.length > 0 ? lines[lines.length - 1].date : null,
     pendingPoAmount: pending,
   }
+}
+
+// ---------- 支出记账（v1.10） ----------
+// 口径：净利 = 毛利 − 支出。支出按 expense_date（本地日期）归属到当天，
+// 与经营报表"赚了多少"同区间相减；只记钱出去，不影响库存和批次。
+
+// 支出分类白名单（个体户常见科目，杂项兜底）
+export const EXPENSE_CATEGORIES = ['进货付款', '房租', '水电', '运费', '人工', '杂项']
+
+const EXPENSE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 支出字段公共校验：分类/金额/方式/日期/供应商，返回归一后的字段 */
+function normalizeExpense(db, { category, amount, method, supplierId, expenseDate, note }) {
+  if (!EXPENSE_CATEGORIES.includes(category)) {
+    throw new Error(`支出分类必须是：${EXPENSE_CATEGORIES.join(' / ')}，收到：${category}`)
+  }
+  assertPositiveInt(amount, '支出金额')
+  const m = method ?? '现金'
+  if (!PAYMENT_METHODS.includes(m)) {
+    throw new Error(`付款方式必须是：${PAYMENT_METHODS.join(' / ')}，收到：${method}`)
+  }
+  const date = expenseDate ?? today()
+  if (!EXPENSE_DATE_RE.test(date)) {
+    throw new Error(`支出日期必须是 YYYY-MM-DD 格式，收到：${expenseDate}`)
+  }
+  let sid = null
+  if (supplierId != null) {
+    const sup = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplierId)
+    if (!sup) throw new Error('供应商不存在')
+    sid = supplierId
+  }
+  return { category, amount, method: m, supplierId: sid, expenseDate: date, note: note?.trim() || null }
+}
+
+/** 记一笔支出：金额单位分；返回完整行（含关联供应商名） */
+export function createExpense(db, input) {
+  const v = normalizeExpense(db, input)
+  return inTransaction(db, () => {
+    const info = db
+      .prepare(
+        `INSERT INTO expenses (category, amount, method, supplier_id, note, expense_date, operator, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(v.category, v.amount, v.method, v.supplierId, v.note, v.expenseDate, input.operator ?? null, now())
+    const row = getExpense(db, info.lastInsertRowid)
+    logAudit(db, '记支出', `${v.category} ${(v.amount / 100).toFixed(2)} 元`,
+      { id: row.id, ...v }, input.operator)
+    return row
+  })
+}
+
+/** 改支出：整单字段全量替换（简单账目不做部分更新） */
+export function updateExpense(db, input) {
+  const { id } = input
+  const old = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
+  if (!old) throw new Error('支出记录不存在或已被删除')
+  const v = normalizeExpense(db, input)
+  return inTransaction(db, () => {
+    db.prepare(
+      `UPDATE expenses SET category = ?, amount = ?, method = ?, supplier_id = ?, note = ?, expense_date = ?
+       WHERE id = ?`,
+    ).run(v.category, v.amount, v.method, v.supplierId, v.note, v.expenseDate, id)
+    const row = getExpense(db, id)
+    logAudit(db, '改支出', `${v.category} ${(v.amount / 100).toFixed(2)} 元`,
+      { id, before: { category: old.category, amount: old.amount }, after: v }, input.operator)
+    return row
+  })
+}
+
+/** 删支出：账目可删（不像客户有引用完整性问题），留审计日志 */
+export function deleteExpense(db, { id, operator }) {
+  const old = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
+  if (!old) throw new Error('支出记录不存在或已被删除')
+  return inTransaction(db, () => {
+    db.prepare('DELETE FROM expenses WHERE id = ?').run(id)
+    logAudit(db, '删支出', `${old.category} ${(old.amount / 100).toFixed(2)} 元`,
+      { id, category: old.category, amount: old.amount, expense_date: old.expense_date }, operator)
+    return { ok: true }
+  })
+}
+
+/** 单条支出（含供应商名） */
+function getExpense(db, id) {
+  return db
+    .prepare(
+      `SELECT e.*, s.name AS supplier_name
+       FROM expenses e LEFT JOIN suppliers s ON s.id = e.supplier_id
+       WHERE e.id = ?`,
+    )
+    .get(id)
+}
+
+/**
+ * 支出列表：可按日期区间 [from, to]（YYYY-MM-DD，含两端）和分类筛选，
+ * 按日期倒序返回（含供应商名，直接给页面渲染）
+ */
+export function listExpenses(db, { from, to, category, limit = 500 } = {}) {
+  const conds = []
+  const args = []
+  if (from) { conds.push('e.expense_date >= ?'); args.push(from) }
+  if (to) { conds.push('e.expense_date <= ?'); args.push(to) }
+  if (category) {
+    if (!EXPENSE_CATEGORIES.includes(category)) {
+      throw new Error(`支出分类必须是：${EXPENSE_CATEGORIES.join(' / ')}，收到：${category}`)
+    }
+    conds.push('e.category = ?')
+    args.push(category)
+  }
+  const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : ''
+  return db
+    .prepare(
+      `SELECT e.*, s.name AS supplier_name
+       FROM expenses e LEFT JOIN suppliers s ON s.id = e.supplier_id
+       ${where}
+       ORDER BY e.expense_date DESC, e.id DESC
+       LIMIT ?`,
+    )
+    .all(...args, Math.min(Math.max(parseInt(limit, 10) || 500, 1), 2000))
 }

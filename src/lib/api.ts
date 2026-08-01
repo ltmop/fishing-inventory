@@ -1,5 +1,7 @@
-// 后端桥：Electron 环境经 preload 暴露 window.fi 走 IPC；
-// 纯浏览器 dev（npm run dev）没有 preload，backend 为 null，store 自动回退到本地 mock 逻辑
+// 后端桥：三种运行形态
+// 1. Electron 桌面端：preload 暴露 window.fi 走 IPC（kind='ipc'）
+// 2. 局域网整机共享：其他电脑/平板浏览器打开主机 /app 页面，走 HTTP /api/invoke（kind='http'）
+// 3. 纯浏览器 dev（npm run dev，没给 token）：backend 为 null，store 回退本地 mock 逻辑
 export interface VoiceProgress {
   file: string
   received: number
@@ -17,11 +19,70 @@ export interface FiBridge {
   onKwsProgress?(callback: (p: VoiceProgress) => void): () => void
 }
 
+export type BackendKind = 'ipc' | 'http' | null
+
 declare global {
   interface Window {
     fi?: FiBridge
   }
 }
 
+const TOKEN_KEY = 'fi-lan-token'
+
+/** 局域网访问令牌：网址 ?token= 带来一次，之后从 localStorage 取（换台设备要重新用主机上的链接打开） */
+export const lanToken: string | null = (() => {
+  if (typeof window === 'undefined') return null
+  const fromUrl = new URLSearchParams(window.location.search).get('token')
+  if (fromUrl) {
+    try {
+      localStorage.setItem(TOKEN_KEY, fromUrl)
+    } catch {
+      // 隐私模式写不进也没关系，本次会话 URL 里的还能用
+    }
+    return fromUrl
+  }
+  try {
+    return localStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+})()
+
+/** 局域网 HTTP 桥：与 window.fi 同一 invoke(channel, payload) 形状，store 层零改动 */
+function createHttpBackend(token: string): FiBridge {
+  return {
+    async invoke(channel: string, payload?: unknown) {
+      let r: Response
+      try {
+        r = await fetch('/api/invoke', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-token': token },
+          body: JSON.stringify({ channel, payload: payload ?? {} }),
+        })
+      } catch {
+        throw new Error('连不上主机——检查收银电脑是不是开着、这台设备是不是连着店里 WiFi')
+      }
+      const data = await r.json().catch(() => ({}))
+      if (r.status === 401) {
+        try {
+          localStorage.removeItem(TOKEN_KEY)
+        } catch {
+          // 忽略
+        }
+        throw new Error('链接已失效——到收银电脑的「设置 → 手机看店」重新复制网址打开')
+      }
+      if (!r.ok) throw new Error(data.error ?? `请求失败（${r.status}）`)
+      return data.result
+    },
+  }
+}
+
 export const backend: FiBridge | null =
-  typeof window !== 'undefined' && window.fi ? window.fi : null
+  typeof window !== 'undefined' && window.fi
+    ? window.fi
+    : typeof window !== 'undefined' && lanToken
+      ? createHttpBackend(lanToken)
+      : null
+
+export const backendKind: BackendKind =
+  typeof window !== 'undefined' && window.fi ? 'ipc' : backend ? 'http' : null

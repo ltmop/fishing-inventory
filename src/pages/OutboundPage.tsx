@@ -1,44 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { motion } from 'motion/react'
-import { ArrowLeftRight, Loader2, PackageMinus, Printer, RotateCcw } from 'lucide-react'
+import { ArrowLeftRight, Printer, RotateCcw } from 'lucide-react'
 import { PageHeader, SuccessBanner, ErrorBanner } from '@/components/feedback'
 import { ReceiptDialog, makeReceiptNo, type ReceiptData } from '@/components/Receipt'
 import { ScanHero } from '@/components/scan/ScanHero'
 import { useAppStore, priceForCustomer } from '@/store/appStore'
 import { previewFifo } from '@/lib/fifo'
 import { playSound } from '@/lib/sounds'
-import { formatDate, formatPrice, formatTime, isToday, productName } from '@/lib/formatters'
+import { formatPrice, isToday, productName } from '@/lib/formatters'
 import type { CreditOptions } from '@/store/appStore'
-import { PRICE_LEVEL_LABELS, type Customer, type PriceLevel, type Product } from '@/types'
-import { Badge } from '@/components/ui/badge'
+import { type Customer, type PaymentMethod, type PriceLevel, type Product } from '@/types'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { cn } from '@/lib/utils'
+import { CartPanel, type CartItem } from './outbound/CartPanel'
+import { CheckoutDialog } from './outbound/CheckoutDialog'
+import { ConfirmOutboundDialog } from './outbound/ConfirmOutboundDialog'
+import { ExchangeDialog, type ExchangeOldPrice } from './outbound/ExchangeDialog'
+import { QuickCustomerDialog } from './outbound/QuickCustomerDialog'
+import { SelectedProductCard } from './outbound/SelectedProductCard'
+import { ReturnDialog } from './outbound/ReturnDialog'
+import { TodayRecordsTable } from './outbound/TodayRecordsTable'
 
 function yuanToCents(v: string): number | null {
   const n = Number(v)
@@ -53,6 +32,7 @@ export function OutboundPage() {
   const totalStockOf = useAppStore((s) => s.totalStockOf)
   const batchesOf = useAppStore((s) => s.batchesOf)
   const confirmOutbound = useAppStore((s) => s.confirmOutbound)
+  const checkout = useAppStore((s) => s.checkout)
   const addReturn = useAppStore((s) => s.addReturn)
   const addExchange = useAppStore((s) => s.addExchange)
   const customers = useAppStore((s) => s.customers)
@@ -82,11 +62,17 @@ export function OutboundPage() {
   const [receipt, setReceipt] = useState<ReceiptData | null>(null)
   const [receiptOpen, setReceiptOpen] = useState(false)
 
+  // 购物清单（一单多商品收银台）：扫码/搜索 → 加入清单 → 去开单统一收款
+  const [cart, setCart] = useState<CartItem[]>([])
+  const [checkoutOpen, setCheckoutOpen] = useState(false)
+  const [checkoutExecuting, setCheckoutExecuting] = useState(false)
+
   // 赊账包：确认出库时选客户 + 付款方式（散客只能全额收款）
   const WALK_IN = '__walkin__'
   const NEW_CUST = '__new__'
   const [custKey, setCustKey] = useState(WALK_IN)
   const [payMode, setPayMode] = useState<'full' | 'partial' | 'credit'>('full')
+  const [payMethod, setPayMethod] = useState<PaymentMethod>('现金')
   const [paidYuan, setPaidYuan] = useState('')
   const [confirmError, setConfirmError] = useState('')
   // 「+ 新客户」快捷建档
@@ -105,6 +91,7 @@ export function OutboundPage() {
   const [retBusy, setRetBusy] = useState(false)
   // 赊账销售的退货：记到原赊账客户账上（后端冲减他的欠款），可手动取消
   const [retUseCredit, setRetUseCredit] = useState(true)
+  const [retPayMethod, setRetPayMethod] = useState<PaymentMethod>('现金')
 
   // 换货登记（清单第 15 项）：先退旧货再出新货，同一事务
   const [exchOpen, setExchOpen] = useState(false)
@@ -226,9 +213,28 @@ export function OutboundPage() {
     // 打开确认框前重置赊账选项：默认散客全额收款，「付一部分」默认填应付总额
     setCustKey(WALK_IN)
     setPayMode('full')
+    setPayMethod('现金')
     setPaidYuan(((qty * price) / 100).toFixed(2))
     setConfirmError('')
     setConfirmOpen(true)
+  }
+
+  // 确认框里切换客户：「+ 新客户」走快捷建档；其余按他的默认档联动出价
+  const handleSelectCustomer = (v: string) => {
+    if (v === NEW_CUST) {
+      setQuickName('')
+      setQuickPhone('')
+      setQuickError('')
+      setQuickCustOpen(true)
+    } else {
+      setCustKey(v)
+      setPayMode('full')
+      setConfirmError('')
+      // 切客户价格联动刷新：有默认档自动按他的档出价，散客回零售价
+      applyCustomerPrice(
+        v === WALK_IN ? null : (customers.find((c) => String(c.id) === v) ?? null),
+      )
+    }
   }
 
   // 确认框里选中「+ 新客户」：快捷建档，建完自动选中
@@ -263,7 +269,7 @@ export function OutboundPage() {
     }
     const total = qty * price
     const custId = custKey === WALK_IN || custKey === NEW_CUST ? null : Number(custKey)
-    // 散客全额收款不传任何记账参数；客户「全额收款」只传 customerId（paidAmount 省略=全额）
+    // 散客全额收款只带到账方式；客户「全额收款」只传 customerId（paidAmount 省略=全额）
     let credit: CreditOptions | undefined
     if (custId !== null) {
       if (payMode === 'credit') {
@@ -282,6 +288,10 @@ export function OutboundPage() {
       } else {
         credit = { customerId: custId }
       }
+    }
+    // 到账方式：纯赊账不收钱时后端自动不落（与 mock 同口径）
+    if (!(custId !== null && payMode === 'credit')) {
+      credit = { ...(credit ?? {}), payMethod }
     }
     // 带上当前选中的价格档：显式售价优先，档仅作兜底/留痕（与后端 tier 口径一致）
     if (credit && activeTier) credit.tier = activeTier
@@ -326,18 +336,138 @@ export function OutboundPage() {
     }
   }
 
+  // 加入清单：校验同单品出库；同商品已在清单里则合并数量（单价用最新一次录入的）
+  const addToCart = () => {
+    if (!selected) return
+    if (!qtyValid) {
+      setError('出库数量必须是 ≥1 的整数')
+      playSound('error')
+      return
+    }
+    const price = yuanToCents(priceYuan)
+    if (priceYuan.trim() === '' || price === null || price <= 0) {
+      setError('请填写实际售价（必须大于 0 元）——营业额和毛利报表都靠它记账')
+      playSound('error')
+      return
+    }
+    const stock = totalStockOf(selected.id)
+    const existing = cart.find((i) => i.product.id === selected.id)
+    const mergedQty = (existing?.quantity ?? 0) + qty
+    if (mergedQty > stock) {
+      setError(`清单里已有 ${existing?.quantity ?? 0} 件，再加 ${qty} 件超过当前库存（共 ${stock} 件）`)
+      playSound('error')
+      return
+    }
+    setCart((c) =>
+      existing
+        ? c.map((i) => (i.product.id === selected.id ? { ...i, quantity: mergedQty, priceCents: price } : i))
+        : [...c, { product: selected, quantity: qty, priceCents: price }],
+    )
+    playSound('success')
+    setSuccess(`已加入清单：${productName(selected)} × ${qty}`)
+    resetSelection()
+  }
+
+  const cartQtyChange = (productId: number, quantity: number) => {
+    const stock = totalStockOf(productId)
+    setCart((c) =>
+      c.map((i) => (i.product.id === productId ? { ...i, quantity: Math.max(1, Math.min(quantity, stock)) } : i)),
+    )
+  }
+  const cartPriceChange = (productId: number, priceCents: number | null) => {
+    // 输入框清空时保持原价不动，避免 0 价混进开单
+    if (priceCents === null) return
+    setCart((c) => c.map((i) => (i.product.id === productId ? { ...i, priceCents } : i)))
+  }
+  const cartRemove = (productId: number) => setCart((c) => c.filter((i) => i.product.id !== productId))
+  const cartClear = () => setCart([])
+
+  const cartTotal = cart.reduce((s, i) => s + i.quantity * i.priceCents, 0)
+
+  // 打开开单确认框：默认散客全额收款，实收默认填清单合计
+  const openCheckout = () => {
+    if (cart.length === 0) return
+    setCustKey(WALK_IN)
+    setPayMode('full')
+    setPayMethod('现金')
+    setPaidYuan((cartTotal / 100).toFixed(2))
+    setConfirmError('')
+    setCheckoutOpen(true)
+  }
+
+  // 统一开单：多行商品一次出库，任一行缺货后端整单回滚
+  const handleCheckoutExecute = async () => {
+    if (cart.length === 0 || checkoutExecuting) return
+    const custId = custKey === WALK_IN || custKey === NEW_CUST ? null : Number(custKey)
+    let credit: CreditOptions | undefined
+    if (custId !== null) {
+      if (payMode === 'credit') {
+        credit = { customerId: custId, paidAmount: 0 }
+      } else if (payMode === 'partial') {
+        const paid = yuanToCents(paidYuan)
+        if (paid === null || paid <= 0) {
+          setConfirmError('请填写这次收了多少钱（大于 0 元）')
+          return
+        }
+        if (paid > cartTotal) {
+          setConfirmError(`收的钱不能超过应付总额 ${formatPrice(cartTotal)}`)
+          return
+        }
+        credit = paid === cartTotal ? { customerId: custId } : { customerId: custId, paidAmount: paid }
+      } else {
+        credit = { customerId: custId }
+      }
+    }
+    // 到账方式：纯赊账不收钱时后端自动不落（与单品出库同口径）
+    if (!(custId !== null && payMode === 'credit')) {
+      credit = { ...(credit ?? {}), payMethod }
+    }
+    setCheckoutExecuting(true)
+    try {
+      const lines = cart.map((i) => ({ productId: i.product.id, quantity: i.quantity, sellingPrice: i.priceCents }))
+      const result = await checkout(lines, operator.trim() || '未署名', credit)
+      if (!result.ok) {
+        setCheckoutOpen(false)
+        playSound('error')
+        setError(`库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`)
+        return
+      }
+      setCheckoutOpen(false)
+      playSound('success')
+      const custName = custId !== null ? (customers.find((c) => c.id === custId)?.name ?? null) : null
+      const owed = credit?.paidAmount != null ? cartTotal - credit.paidAmount : 0
+      // 留档小票：一单多样逐行打印
+      setReceipt({
+        receiptNo: makeReceiptNo(),
+        time: new Date().toISOString(),
+        operator: operator.trim() || '未署名',
+        items: cart.map((i) => ({ name: productName(i.product), quantity: i.quantity, unitPrice: i.priceCents })),
+        paid: credit?.paidAmount ?? null,
+        customerName: custName,
+      })
+      const summary = cart.map((i) => `${productName(i.product)} × ${i.quantity}`).join('，')
+      if (custName && owed > 0) {
+        setSuccess(`已开单：${summary}；${custName} 欠 ${formatPrice(owed)}`)
+      } else if (custName) {
+        setSuccess(`已开单：${summary}；${custName} 已全额付款`)
+      } else {
+        setSuccess(`已开单：${summary}`)
+      }
+      setCart([])
+      inputRef.current?.focus()
+    } catch (e) {
+      setCheckoutOpen(false)
+      playSound('error')
+      setError(`开单失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setCheckoutExecuting(false)
+    }
+  }
+
   // 今日流水：出库 + 退货 + 换货（换货双腿已按 return/out 记账，退差价按 exchange 记账，天然包含）
   const todayRecords = transactions.filter(
     (t) => (t.type === 'out' || t.type === 'return' || t.type === 'exchange') && isToday(t.timestamp),
   )
-
-  // 流水类型标签：优先用 notes 识别换货双腿/退差价
-  const txKindLabel = (t: (typeof todayRecords)[number]): string => {
-    if (t.notes === '换货出新') return '换货出新'
-    if (t.notes === '换货退旧') return '换货退旧'
-    if (t.notes === '换货退差价') return '退差价'
-    return t.type === 'return' ? '退货' : t.type === 'exchange' ? '退差价' : '出库'
-  }
 
   // 退货候选：与出库搜索同规则
   const retCandidates = useMemo(() => {
@@ -373,6 +503,7 @@ export function OutboundPage() {
     setRetQty('')
     setRetRefund('')
     setRetUseCredit(true)
+    setRetPayMethod('现金')
     setError('')
     setReturnOpen(true)
   }
@@ -392,7 +523,7 @@ export function OutboundPage() {
     const creditCust = retUseCredit ? retCreditCustomer : null
     setRetBusy(true)
     try {
-      await addReturn(retSelected.id, q, refund, operator.trim() || '未署名', creditCust?.id ?? null)
+      await addReturn(retSelected.id, q, refund, operator.trim() || '未署名', creditCust?.id ?? null, creditCust ? null : retPayMethod)
       setReturnOpen(false)
       playSound('success')
       setSuccess(
@@ -463,16 +594,16 @@ export function OutboundPage() {
   }
 
   // 旧腿原售价（与后端 createExchange 同口径）：最近一条带售价的出库流水 → 建议零售价 → 0
-  const exchOldPrice = useMemo(() => {
+  const exchOldPrice = useMemo<ExchangeOldPrice | null>(() => {
     if (!exchOld) return null
     const tx = transactions.find(
       (t) => t.product_id === exchOld.id && t.type === 'out' && t.selling_price != null,
     )
-    if (tx) return { unitPrice: tx.selling_price!, source: 'transaction' as const, tx }
+    if (tx) return { unitPrice: tx.selling_price!, source: 'transaction', tx }
     if (exchOld.suggest_price != null) {
-      return { unitPrice: exchOld.suggest_price, source: 'suggest' as const, tx: null }
+      return { unitPrice: exchOld.suggest_price, source: 'suggest', tx: null }
     }
-    return { unitPrice: 0, source: 'none' as const, tx: null }
+    return { unitPrice: 0, source: 'none', tx: null }
   }, [exchOld, transactions])
 
   // 差价试算：新腿售价合计 - 旧腿原售价合计（与后端一致）
@@ -577,59 +708,6 @@ export function OutboundPage() {
     }
   }
 
-  // 换货对话框里的商品选择器（搜索 → 点选）
-  const renderExchPicker = (
-    label: string,
-    sel: Product | null,
-    setSel: (p: Product | null) => void,
-    kw: string,
-    setKw: (v: string) => void,
-    excludeId: number | null,
-  ) => (
-    <div className="relative space-y-1">
-      <Label>{label} *</Label>
-      {sel ? (
-        <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50 px-4 py-2.5">
-          <div className="text-sm">
-            <span className="font-medium text-slate-800">{productName(sel)}</span>
-            <span className="ml-2 font-mono text-xs text-muted-foreground">{sel.sku_code}</span>
-            <span className="ml-2 text-xs text-muted-foreground">库存 {totalStockOf(sel.id)}</span>
-          </div>
-          <Button variant="ghost" size="sm" onClick={() => setSel(null)}>
-            换一个
-          </Button>
-        </div>
-      ) : (
-        <>
-          <Input value={kw} onChange={(e) => setKw(e.target.value)} placeholder="输入 SKU/品牌/型号搜索..." />
-          {kw.trim() && (
-            <div className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border bg-white shadow-card-hover">
-              {searchProducts(kw, excludeId).map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => {
-                    setSel(p)
-                    setKw('')
-                  }}
-                  className="flex w-full cursor-pointer items-center justify-between px-4 py-2.5 text-left text-sm transition-colors hover:bg-brand-50"
-                >
-                  <span>
-                    {productName(p)}
-                    <span className="ml-2 font-mono text-xs text-muted-foreground">{p.sku_code}</span>
-                  </span>
-                  <span className="text-xs text-muted-foreground">库存 {totalStockOf(p.id)}</span>
-                </button>
-              ))}
-              {searchProducts(kw, excludeId).length === 0 && (
-                <div className="px-4 py-3 text-sm text-muted-foreground">没有匹配的商品</div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  )
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -712,670 +790,180 @@ export function OutboundPage() {
 
       {/* 选中商品：与入库匹配卡片同款升舱处理 */}
       {selected && (
-        <Card className="gap-0 overflow-hidden py-0">
-          <div className="h-1.5 bg-gradient-to-r from-brand-500 via-brand-600 to-brand-700" />
-          <CardHeader className="pt-5">
-            <CardTitle className="flex items-center gap-3 text-lg">
-              {productName(selected)}
-              <Badge variant="secondary">{selected.category}</Badge>
-              <span className="text-sm font-normal text-muted-foreground">
-                当前总库存：<span className="font-semibold text-brand-600">{totalStock} 件</span>
-              </span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 pb-5">
-            <div className="space-y-2">
-              <div className="text-sm text-slate-600">批次库存（FIFO，按入库日期排列）：</div>
-              {productBatches.length === 0 ? (
-                <div className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-                  该商品暂无库存，无法出库
-                </div>
-              ) : (
-                productBatches.map((b, idx) => {
-                  const deduct = byBatch.get(b.id) ?? 0
-                  return (
-                    <div
-                      key={b.id}
-                      className={cn(
-                        'relative flex items-center gap-4 rounded-md border px-4 py-2 text-sm',
-                        idx === 0 && 'border-l-4 border-l-green-500',
-                        deduct > 0 && 'bg-slate-100/70',
-                      )}
-                    >
-                      <span className="font-mono text-xs">{b.batch_no}</span>
-                      {idx === 0 && <Badge className="bg-green-600">最早批次</Badge>}
-                      <span>库存 {b.quantity}</span>
-                      <span>{formatPrice(b.cost_price)}</span>
-                      <span className="text-muted-foreground">{b.location ?? '-'}</span>
-                      <span className="text-muted-foreground">{formatDate(b.inbound_date)}</span>
-                      {deduct > 0 && (
-                        <span className="ml-auto font-medium text-red-600">
-                          扣 {deduct} → 剩 {b.quantity - deduct}
-                        </span>
-                      )}
-                    </div>
-                  )
-                })
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <div className="space-y-1">
-                <Label>出库数量 *</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  className={cn(overStock && 'border-red-500 focus-visible:ring-red-500')}
-                />
-                {overStock && (
-                  <div className="text-xs text-red-600">
-                    出库数量超过当前库存（还差 {plan!.shortage} 个）
-                  </div>
-                )}
-              </div>
-              <div className="space-y-1">
-                <Label>
-                  售价（元）<span className="text-red-500">*</span>
-                  {activeTier && (
-                    <Badge className="ml-2 bg-brand-100 text-brand-700">
-                      {PRICE_LEVEL_LABELS[activeTier]}价
-                    </Badge>
-                  )}
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={priceYuan}
-                  onChange={(e) => {
-                    setPriceYuan(e.target.value)
-                    // 手动改价后：还和某档价格一致就算那档，否则算自定义价
-                    const cents = yuanToCents(e.target.value)
-                    setActiveTier(
-                      cents !== null
-                        ? (selectedTiers.find((t) => t.price === cents)?.tier ?? null)
-                        : null,
-                    )
-                  }}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label>操作人</Label>
-                <Input value={operator} onChange={(e) => setOperator(e.target.value)} />
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <Button asChild onClick={handleConfirmClick} disabled={productBatches.length === 0}>
-                <motion.button whileTap={{ scale: 0.96 }}>
-                <PackageMinus className="size-4" />
-                确认出库
-                </motion.button>
-              </Button>
-              <Button variant="ghost" onClick={resetSelection}>
-                取消
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+        <SelectedProductCard
+          selected={selected}
+          totalStock={totalStock}
+          productBatches={productBatches}
+          byBatch={byBatch}
+          quantity={quantity}
+          onQuantityChange={setQuantity}
+          overStock={overStock}
+          plan={plan}
+          priceYuan={priceYuan}
+          onPriceChange={(v) => {
+            setPriceYuan(v)
+            // 手动改价后：还和某档价格一致就算那档，否则算自定义价
+            const cents = yuanToCents(v)
+            setActiveTier(
+              cents !== null
+                ? (selectedTiers.find((t) => t.price === cents)?.tier ?? null)
+                : null,
+            )
+          }}
+          activeTier={activeTier}
+          operator={operator}
+          onOperatorChange={setOperator}
+          onConfirm={handleConfirmClick}
+          onAddToCart={addToCart}
+          onCancel={resetSelection}
+        />
       )}
 
+      {/* 购物清单（一单多商品）：扫码加入后在这里改数量/单价，去开单统一收款 */}
+      <CartPanel
+        items={cart}
+        totalStockOf={totalStockOf}
+        onQtyChange={cartQtyChange}
+        onPriceChange={cartPriceChange}
+        onRemove={cartRemove}
+        onClear={cartClear}
+        onCheckout={openCheckout}
+      />
+
       {/* 今日出入账记录（出库/退货/换货） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">今日出入账记录（{todayRecords.length} 条）</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {todayRecords.length === 0 ? (
-            <div className="py-8 text-center text-sm text-muted-foreground">今日暂无出入账记录</div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>类型</TableHead>
-                  <TableHead>品名</TableHead>
-                  <TableHead>客户</TableHead>
-                  <TableHead>批次号</TableHead>
-                  <TableHead className="text-right">数量</TableHead>
-                  <TableHead className="text-right">成本价</TableHead>
-                  <TableHead className="text-right">售价/退款</TableHead>
-                  <TableHead className="text-right">毛利</TableHead>
-                  <TableHead>操作人</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {todayRecords.map((t) => {
-                  const p = products.find((x) => x.id === t.product_id)
-                  const b = batches.find((x) => x.id === t.batch_id)
-                  const isReturn = t.type === 'return'
-                  const isExchangeDiff = t.type === 'exchange' // 换货退差价：不动库存，paid_amount 为负退款额
-                  // 退货按负毛利冲减：退款 − 批次成本，取负
-                  const profit =
-                    t.selling_price != null && t.unit_price != null
-                      ? (t.selling_price - t.unit_price) * t.quantity * (isReturn ? -1 : 1)
-                      : null
-                  const kind = txKindLabel(t)
-                  return (
-                    <TableRow key={t.id}>
-                      <TableCell>{formatTime(t.timestamp)}</TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={isReturn || isExchangeDiff ? 'destructive' : 'secondary'}
-                          className={cn(kind.startsWith('换货') && !isReturn && 'bg-brand-100 text-brand-700')}
-                        >
-                          {kind}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        {p ? productName(p) : `#${t.product_id}`}
-                      </TableCell>
-                      <TableCell>
-                        {(() => {
-                          const cust = t.customer_id != null ? customers.find((c) => c.id === t.customer_id) : null
-                          // 赊账标：赊账单后端会写实收金额，欠 = 应付 − 实收
-                          const owed =
-                            !isReturn && t.paid_amount != null && t.selling_price != null
-                              ? t.quantity * t.selling_price - t.paid_amount
-                              : 0
-                          return cust ? (
-                            <span>
-                              {cust.name}
-                              {owed > 0 && (
-                                <Badge variant="destructive" className="ml-2">
-                                  赊 {formatPrice(owed)}
-                                </Badge>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-slate-400">散客</span>
-                          )
-                        })()}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{b?.batch_no ?? '-'}</TableCell>
-                      <TableCell className={cn('text-right', isReturn && 'text-red-600')}>
-                        {isExchangeDiff ? '-' : isReturn ? `-${t.quantity}` : t.quantity}
-                      </TableCell>
-                      <TableCell className="text-right">{formatPrice(t.unit_price)}</TableCell>
-                      <TableCell className={cn('text-right', (isReturn || isExchangeDiff) && 'text-red-600')}>
-                        {isExchangeDiff ? formatPrice(t.paid_amount) : formatPrice(t.selling_price)}
-                      </TableCell>
-                      <TableCell
-                        className={cn(
-                          'text-right tabular-nums',
-                          profit !== null && profit >= 0 ? 'text-green-700' : 'text-red-600',
-                        )}
-                      >
-                        {profit !== null ? formatPrice(profit) : '-'}
-                      </TableCell>
-                      <TableCell>{t.operator ?? '-'}</TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      <TodayRecordsTable
+        records={todayRecords}
+        products={products}
+        batches={batches}
+        customers={customers}
+      />
 
       {/* 出库确认 Dialog（危险操作二次确认） */}
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>确认出库</DialogTitle>
-            <DialogDescription>
-              {selected ? productName(selected) : ''} × {quantity}
-              {qtyValid && yuanToCents(priceYuan) !== null && (
-                <>
-                  ，应付 <span className="font-semibold text-slate-700">{formatPrice(qty * (yuanToCents(priceYuan) ?? 0))}</span>
-                </>
-              )}
-              ，将按 FIFO 扣减以下批次：
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            {plan?.allocations.map((a) => (
-              <div
-                key={a.batch_id}
-                className="flex items-center justify-between rounded-md border px-4 py-2 text-sm"
-              >
-                <span className="font-mono text-xs">{a.batch_no}</span>
-                <span>
-                  扣 <span className="font-medium text-red-600">{a.deduct}</span> → 剩{' '}
-                  {a.remaining_after}
-                </span>
-              </div>
-            ))}
-          </div>
+      <ConfirmOutboundDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        selected={selected}
+        quantity={quantity}
+        qty={qty}
+        qtyValid={qtyValid}
+        priceYuan={priceYuan}
+        plan={plan}
+        selectedTiers={selectedTiers}
+        activeTier={activeTier}
+        onApplyTier={applyTier}
+        custKey={custKey}
+        walkInKey={WALK_IN}
+        newCustKey={NEW_CUST}
+        onSelectCustomer={handleSelectCustomer}
+        payMode={payMode}
+        onPayModeChange={(mode) => {
+          setPayMode(mode)
+          setConfirmError('')
+        }}
+        paidYuan={paidYuan}
+        onPaidYuanChange={setPaidYuan}
+        payMethod={payMethod}
+        onPayMethodChange={setPayMethod}
+        confirmError={confirmError}
+        customers={customers}
+        executing={executing}
+        onExecute={handleExecute}
+      />
 
-          {/* 价格档：该商品设了档次价才显示；点一下带出这档价格，售价仍可回主界面手改 */}
-          {selectedTiers.length > 0 && (
-            <div className="space-y-2">
-              <Label>按哪档价格卖</Label>
-              <div className="flex flex-wrap gap-2">
-                {selectedTiers.map((t) => (
-                  <button
-                    key={t.tier}
-                    onClick={() => applyTier(t.tier)}
-                    className={cn(
-                      'h-12 min-w-24 cursor-pointer rounded-xl border px-4 text-base font-medium transition-colors',
-                      activeTier === t.tier
-                        ? 'border-brand-600 bg-brand-600 text-white shadow-sm'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100',
-                    )}
-                  >
-                    {PRICE_LEVEL_LABELS[t.tier]}{' '}
-                    <span className="tabular-nums">{formatPrice(t.price)}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                当前售价 {formatPrice(yuanToCents(priceYuan))}
-                {yuanToCents(priceYuan) !== null &&
-                  (activeTier !== null ? `（${PRICE_LEVEL_LABELS[activeTier]}价）` : '（自定义价）')}
-              </div>
-            </div>
-          )}
-
-          {/* 买的人 + 付款方式：散客只能全额收款；选了客户可以赊账 */}
-          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <div className="space-y-1">
-              <Label>买的人</Label>
-              <Select
-                value={custKey}
-                onValueChange={(v) => {
-                  if (v === NEW_CUST) {
-                    setQuickName('')
-                    setQuickPhone('')
-                    setQuickError('')
-                    setQuickCustOpen(true)
-                  } else {
-                    setCustKey(v)
-                    setPayMode('full')
-                    setConfirmError('')
-                    // 切客户价格联动刷新：有默认档自动按他的档出价，散客回零售价
-                    applyCustomerPrice(
-                      v === WALK_IN ? null : (customers.find((c) => String(c.id) === v) ?? null),
-                    )
-                  }
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={WALK_IN}>散客（不记账）</SelectItem>
-                  {customers.map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name}
-                      {c.outstanding > 0 ? `（还欠 ${formatPrice(c.outstanding)}）` : ''}
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={NEW_CUST}>+ 新客户</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {custKey === WALK_IN ? (
-              <div className="text-sm text-slate-500">散客需全额收款，钱货两清</div>
-            ) : (
-              <div className="space-y-2">
-                <div className="grid grid-cols-3 gap-2">
-                  {(
-                    [
-                      ['full', '全额收款'],
-                      ['partial', '付一部分'],
-                      ['credit', '先欠着'],
-                    ] as const
-                  ).map(([mode, label]) => (
-                    <button
-                      key={mode}
-                      onClick={() => {
-                        setPayMode(mode)
-                        setConfirmError('')
-                      }}
-                      className={cn(
-                        'h-12 cursor-pointer rounded-xl border text-base font-medium transition-colors',
-                        payMode === mode
-                          ? 'border-brand-600 bg-brand-600 text-white shadow-sm'
-                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100',
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {payMode === 'partial' && (
-                  <div className="space-y-1">
-                    <Label>这次收了多少钱（元）</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={paidYuan}
-                      onChange={(e) => setPaidYuan(e.target.value)}
-                      className="h-12 text-xl font-bold tabular-nums"
-                    />
-                  </div>
-                )}
-                {payMode !== 'full' && qtyValid && yuanToCents(priceYuan) !== null && (
-                  <div className="text-sm text-red-600">
-                    这次先欠{' '}
-                    {formatPrice(
-                      qty * (yuanToCents(priceYuan) ?? 0) -
-                        (payMode === 'credit' ? 0 : Math.min(yuanToCents(paidYuan) ?? 0, qty * (yuanToCents(priceYuan) ?? 0))),
-                    )}
-                    ，记到「{customers.find((c) => String(c.id) === custKey)?.name ?? ''}」账上
-                  </div>
-                )}
-              </div>
-            )}
-            {confirmError && <div className="text-sm text-red-600">{confirmError}</div>}
-          </div>
-
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={handleExecute} disabled={executing}>
-              {executing && <Loader2 className="size-4 animate-spin" />}
-              {executing ? '执行中...' : '确认执行出库'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* 一单多商品开单确认 Dialog：清单明细 + 统一收款 */}
+      <CheckoutDialog
+        open={checkoutOpen}
+        onOpenChange={setCheckoutOpen}
+        items={cart}
+        totalCents={cartTotal}
+        custKey={custKey}
+        walkInKey={WALK_IN}
+        newCustKey={NEW_CUST}
+        onSelectCustomer={handleSelectCustomer}
+        payMode={payMode}
+        onPayModeChange={(mode) => {
+          setPayMode(mode)
+          setConfirmError('')
+        }}
+        payMethod={payMethod}
+        onPayMethodChange={setPayMethod}
+        paidYuan={paidYuan}
+        onPaidYuanChange={setPaidYuan}
+        confirmError={confirmError}
+        customers={customers}
+        executing={checkoutExecuting}
+        onExecute={handleCheckoutExecute}
+      />
 
       {/* 「+ 新客户」快捷建档 Dialog：只填姓名电话，建完自动选中 */}
-      <Dialog open={quickCustOpen} onOpenChange={setQuickCustOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>新客户</DialogTitle>
-            <DialogDescription>先建个简单的档案，回头可以在「客户」页补全资料</DialogDescription>
-          </DialogHeader>
-          {quickError && (
-            <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-              {quickError}
-            </div>
-          )}
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <Label>姓名 *</Label>
-              <Input
-                autoFocus
-                value={quickName}
-                onChange={(e) => setQuickName(e.target.value)}
-                placeholder="比如：老王"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label>电话</Label>
-              <Input value={quickPhone} onChange={(e) => setQuickPhone(e.target.value)} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setQuickCustOpen(false)} disabled={quickBusy}>
-              取消
-            </Button>
-            <Button onClick={handleQuickCreate} disabled={quickBusy}>
-              {quickBusy && <Loader2 className="size-4 animate-spin" />}
-              {quickBusy ? '保存中...' : '保存并选中'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <QuickCustomerDialog
+        open={quickCustOpen}
+        onOpenChange={setQuickCustOpen}
+        name={quickName}
+        onNameChange={setQuickName}
+        phone={quickPhone}
+        onPhoneChange={setQuickPhone}
+        busy={quickBusy}
+        error={quickError}
+        onSubmit={handleQuickCreate}
+      />
 
       {/* 退货登记 Dialog：退回来的货重新入架，退款金额入账 */}
-      <Dialog open={returnOpen} onOpenChange={setReturnOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <RotateCcw className="size-5 text-brand-500" />
-              退货登记
-            </DialogTitle>
-            <DialogDescription>
-              退回来的商品会加回库存（计入最近一次入库的批次），退款金额记入今日账目
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {!retSelected ? (
-              <div className="relative space-y-1">
-                <Label>搜索退货商品 *</Label>
-                <Input
-                  autoFocus
-                  value={retKeyword}
-                  onChange={(e) => setRetKeyword(e.target.value)}
-                  placeholder="输入 SKU/品牌/型号搜索..."
-                />
-                {retCandidates.length > 0 && (
-                  <div className="absolute inset-x-0 top-full z-10 mt-1 overflow-hidden rounded-xl border bg-white shadow-card-hover">
-                    {retCandidates.map((p) => (
-                      <button
-                        key={p.id}
-                        onClick={() => {
-                          setRetSelected(p)
-                          setRetKeyword('')
-                        }}
-                        className="flex w-full cursor-pointer items-center justify-between px-4 py-2.5 text-left text-sm transition-colors hover:bg-brand-50"
-                      >
-                        <span>
-                          {productName(p)}
-                          <span className="ml-2 font-mono text-xs text-muted-foreground">
-                            {p.sku_code}
-                          </span>
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          库存 {totalStockOf(p.id)}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50 px-4 py-3">
-                  <div className="text-sm">
-                    <span className="font-medium text-slate-800">{productName(retSelected)}</span>
-                    <span className="ml-2 font-mono text-xs text-muted-foreground">
-                      {retSelected.sku_code}
-                    </span>
-                  </div>
-                  <Button variant="ghost" size="sm" onClick={() => setRetSelected(null)}>
-                    换一个
-                  </Button>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <Label>退货数量 *</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={retQty}
-                      onChange={(e) => setRetQty(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label>退款金额（元）*</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={retRefund}
-                      onChange={(e) => setRetRefund(e.target.value)}
-                      placeholder="退给顾客多少钱"
-                    />
-                  </div>
-                </div>
-                {/* 赊账销售的退货：记到原客户账上，退货后他少欠；不是他的可以点掉 */}
-                {retCreditCustomer && (
-                  <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-                    {retUseCredit ? (
-                      <span>
-                        「{retCreditCustomer.name}」赊账买过这个，这次退货记到他账上，退货后他少欠
-                      </span>
-                    ) : (
-                      <span>这次退货不记到任何人账上</span>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => setRetUseCredit(!retUseCredit)}>
-                      {retUseCredit ? '不是他的' : '记到他账上'}
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setReturnOpen(false)} disabled={retBusy}>
-              取消
-            </Button>
-            <Button onClick={handleReturnSubmit} disabled={!retSelected || retBusy}>
-              {retBusy && <Loader2 className="size-4 animate-spin" />}
-              {retBusy ? '登记中...' : '确认退货入库'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ReturnDialog
+        open={returnOpen}
+        onOpenChange={setReturnOpen}
+        keyword={retKeyword}
+        onKeywordChange={setRetKeyword}
+        candidates={retCandidates}
+        selected={retSelected}
+        onSelect={setRetSelected}
+        qty={retQty}
+        onQtyChange={setRetQty}
+        refund={retRefund}
+        onRefundChange={setRetRefund}
+        creditCustomer={retCreditCustomer}
+        useCredit={retUseCredit}
+        onToggleUseCredit={() => setRetUseCredit(!retUseCredit)}
+        payMethod={retPayMethod}
+        onPayMethodChange={setRetPayMethod}
+        busy={retBusy}
+        onSubmit={handleReturnSubmit}
+        totalStockOf={totalStockOf}
+      />
 
       {/* 换货登记 Dialog：先退旧货再出新货，同一事务，失败整体回滚 */}
-      <Dialog open={exchOpen} onOpenChange={setExchOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <ArrowLeftRight className="size-5 text-brand-500" />
-              换货登记
-            </DialogTitle>
-            <DialogDescription>
-              旧货退回库存、新货按 FIFO 出库，两步一笔账；新货库存不足时不会动账
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {renderExchPicker('退回的旧商品', exchOld, setExchOld, exchOldKw, setExchOldKw, exchNew?.id ?? null)}
-            {renderExchPicker('换出的新商品', exchNew, selectExchNew, exchNewKw, setExchNewKw, exchOld?.id ?? null)}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label>数量 *</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={exchQty}
-                  onChange={(e) => setExchQty(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label>
-                  新货售价（元）<span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={exchPrice}
-                  onChange={(e) => setExchPrice(e.target.value)}
-                />
-              </div>
-            </div>
-
-            {/* 谁换的货：补的钱要赊账必须选客户；退差价冲欠款按原单客户自动认 */}
-            <div className="space-y-1">
-              <Label>谁换的货</Label>
-              <Select value={exchCustKey} onValueChange={selectExchCustomer}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={WALK_IN}>散客（当场结清）</SelectItem>
-                  {customers.map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name}
-                      {c.outstanding > 0 ? `（还欠 ${formatPrice(c.outstanding)}）` : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* 差价试算：选好新旧货和数量后实时显示 */}
-            {exchDiff != null && exchOldPrice && (
-              <div
-                className={cn(
-                  'space-y-1 rounded-xl border px-4 py-3 text-[15px]',
-                  exchDiff > 0
-                    ? 'border-red-200 bg-red-50 text-red-700'
-                    : exchDiff < 0
-                      ? 'border-amber-200 bg-amber-50 text-amber-800'
-                      : 'border-slate-200 bg-slate-50 text-slate-600',
-                )}
-              >
-                <div className="font-medium">
-                  {exchDiff > 0
-                    ? `新货比旧货贵 ${formatPrice(exchDiff)}，要补钱`
-                    : exchDiff < 0
-                      ? `新货比旧货便宜 ${formatPrice(-exchDiff)}，要退钱`
-                      : '新旧货一样价，不用补也不用退'}
-                </div>
-                <div className="text-xs opacity-80">
-                  旧货按 {formatPrice(exchOldPrice.unitPrice)} 算
-                  {exchOldPrice.source !== 'transaction' && '（没找到售价记录，按建议价算）'}
-                </div>
-              </div>
-            )}
-
-            {/* 补钱：实收默认全补，可选「补的钱也先欠着」（必须选客户） */}
-            {exchDiff != null && exchDiff > 0 && (
-              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <div className="space-y-1">
-                  <Label>补的钱实收多少（元）</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={exchDiffOnCredit ? '0.00' : exchDiffPaid}
-                    onChange={(e) => setExchDiffPaid(e.target.value)}
-                    disabled={exchDiffOnCredit}
-                    className="h-12 text-xl font-bold tabular-nums"
-                  />
-                </div>
-                <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-                  <span>
-                    {exchDiffOnCredit
-                      ? `补的钱先欠着，记到「${exchCustomer?.name ?? '—'}」账上`
-                      : '补的钱当场收'}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setExchDiffOnCredit(!exchDiffOnCredit)}
-                  >
-                    {exchDiffOnCredit ? '改成当场收' : '补的钱也先欠着'}
-                  </Button>
-                </div>
-                {exchDiffOnCredit && !exchCustomer && (
-                  <div className="text-sm text-red-600">
-                    先在上面选一个客户，才能把补的钱记他账上
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 退钱：处理方式说明（原单赊账未付清的冲欠款，否则退现金） */}
-            {exchDiff != null && exchDiff < 0 && (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-                {exchRefundOffsetCust
-                  ? `原单是「${exchRefundOffsetCust.name}」赊的还没付清，差价 ${formatPrice(-exchDiff)} 从他欠的钱里扣`
-                  : `差价 ${formatPrice(-exchDiff)} 退现金给顾客`}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setExchOpen(false)} disabled={exchBusy}>
-              取消
-            </Button>
-            <Button onClick={handleExchangeSubmit} disabled={!exchOld || !exchNew || exchBusy}>
-              {exchBusy && <Loader2 className="size-4 animate-spin" />}
-              {exchBusy ? '换货中...' : '确认换货'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ExchangeDialog
+        open={exchOpen}
+        onOpenChange={setExchOpen}
+        exchOld={exchOld}
+        onSelectOld={setExchOld}
+        exchNew={exchNew}
+        onSelectNew={selectExchNew}
+        oldKw={exchOldKw}
+        onOldKwChange={setExchOldKw}
+        newKw={exchNewKw}
+        onNewKwChange={setExchNewKw}
+        qty={exchQty}
+        onQtyChange={setExchQty}
+        price={exchPrice}
+        onPriceChange={setExchPrice}
+        customers={customers}
+        custKey={exchCustKey}
+        walkInKey={WALK_IN}
+        onSelectCustomer={selectExchCustomer}
+        customer={exchCustomer}
+        diff={exchDiff}
+        oldPrice={exchOldPrice}
+        diffPaid={exchDiffPaid}
+        onDiffPaidChange={setExchDiffPaid}
+        diffOnCredit={exchDiffOnCredit}
+        onToggleDiffOnCredit={() => setExchDiffOnCredit(!exchDiffOnCredit)}
+        refundOffsetCust={exchRefundOffsetCust}
+        busy={exchBusy}
+        onSubmit={handleExchangeSubmit}
+        searchProducts={searchProducts}
+        totalStockOf={totalStockOf}
+      />
 
       {/* 小票预览/打印 Dialog：出库成功后从「打印小票」按钮打开 */}
       <ReceiptDialog data={receipt} open={receiptOpen} onOpenChange={setReceiptOpen} />

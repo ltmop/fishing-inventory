@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { motion } from 'motion/react'
 import {
   Box,
   CalendarClock,
@@ -26,22 +25,17 @@ import {
   YAxis,
 } from 'recharts'
 import { useAppStore } from '@/store/appStore'
-import { formatPrice, formatTime, isToday, productName } from '@/lib/formatters'
+import { formatPrice, isToday, productName } from '@/lib/formatters'
 import { computeExpiring } from '@/lib/expiry'
+import { splitTodayPayments } from '@/lib/paySplit'
 import type { ExpiringProduct } from '@/types'
-import { useCountUp } from '@/lib/useCountUp'
 import { backend } from '@/lib/api'
-import { Sparkles } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { AiPanel } from '@/components/ai/AiPanel'
+import { StatCard, type CardSpec } from './dashboard/StatCard'
+import { TodaySalesCard } from './dashboard/TodaySalesCard'
+import { AdviceCard } from './dashboard/AdviceCard'
+import { computeRestockAdvice } from '@/lib/restockAdvice'
 
 // 图表统一品牌深蓝系：主色 brand-600 起，同色系深浅递进，末尾两格留灰给"其他"
 const PIE_COLORS = ['#1d4ed8', '#2563eb', '#3b82f6', '#60a5fa', '#0ea5e9', '#38bdf8', '#1e40af', '#818cf8', '#94a3b8']
@@ -62,80 +56,6 @@ function sameDay(iso: string, offset: number): boolean {
     d.getFullYear() === target.getFullYear() &&
     d.getMonth() === target.getMonth() &&
     d.getDate() === target.getDate()
-  )
-}
-
-interface CardSpec {
-  title: string
-  value: number
-  format: (v: number) => string
-  unit: string
-  icon: typeof Box
-  cardClass: string
-  iconClass: string
-  numClass: string
-  pulse?: boolean
-  /** 点击跳转/动作：预警卡片必须能点进去处理，否则预警形同虚设 */
-  action?: () => void
-  actionHint?: string
-  /** 主打卡片：占两列、数字更大（库存总值） */
-  featured?: boolean
-}
-
-function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
-  const animated = useCountUp(spec.value)
-  const Icon = spec.icon
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, delay: index * 0.05, ease: 'easeOut' }}
-      whileHover={{ y: -3 }}
-      className={spec.featured ? 'col-span-2' : ''}
-    >
-      <Card
-        onClick={spec.action}
-        onKeyDown={
-          spec.action
-            ? (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  spec.action!()
-                }
-              }
-            : undefined
-        }
-        role={spec.action ? 'button' : undefined}
-        tabIndex={spec.action ? 0 : undefined}
-        className={`h-full border-0 shadow-card transition-shadow hover:shadow-card-hover ${spec.cardClass} ${
-          spec.pulse ? 'animate-pulse' : ''
-        } ${spec.action ? 'cursor-pointer focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:outline-none' : ''}`}
-      >
-        <CardContent className={spec.featured ? 'flex h-full items-center gap-5 pt-6' : 'pt-6'}>
-          <div className={`inline-flex rounded-full p-2.5 ${spec.iconClass} ${spec.featured ? 'mb-0 p-3.5' : 'mb-3'}`}>
-            <Icon className={spec.featured ? 'size-7' : 'size-5'} />
-          </div>
-          <div>
-            <div className={`text-xs ${spec.featured ? 'text-white/70' : 'text-slate-500'}`}>{spec.title}</div>
-            <div
-              className={`font-bold leading-tight tabular-nums ${spec.numClass} ${
-                spec.featured ? 'text-[36px]' : 'text-[28px]'
-              }`}
-            >
-              {spec.format(animated)}
-            </div>
-            <div className={`text-xs ${spec.featured ? 'text-white/60' : 'text-slate-400'}`}>
-              {spec.unit}
-              {spec.actionHint && (
-                <span className={spec.featured ? 'ml-1 text-white/80' : 'ml-1 text-brand-500'}>
-                  {spec.actionHint} →
-                </span>
-              )}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    </motion.div>
   )
 }
 
@@ -172,6 +92,12 @@ export function DashboardPage() {
   const pendingPOCount = useMemo(
     () => purchaseOrders.filter((o) => o.status === 'sent' || o.status === 'partial').length,
     [purchaseOrders],
+  )
+
+  // 经营建议：补货 + 滞销清仓（纯规则，口径见 restockAdvice.ts 文件头）
+  const advice = useMemo(
+    () => computeRestockAdvice(products, batches, transactions),
+    [products, batches, transactions],
   )
 
   const stats = useMemo(() => {
@@ -244,6 +170,12 @@ export function DashboardPage() {
     const margin = revenue > 0 ? profit / revenue : null
     return { rows, outs, qty, revenue, profit, margin }
   }, [transactions, products])
+
+  // 今日到账按收款方式拆分（现金/微信/支付宝/其他 + 未记录 + 新增赊账），日结对账一眼对上
+  const paySplit = useMemo(
+    () => splitTodayPayments(transactions.filter((t) => isToday(t.timestamp))),
+    [transactions],
+  )
 
   // AI 一句话打烊日报：仅在已配置 Key 且有成交时请求；失败静默隐藏，数字报表兜底
   const [aiConfigured, setAiConfigured] = useState(false)
@@ -380,119 +312,11 @@ export function DashboardPage() {
         </Link>
       )}
 
+      {/* 经营建议：该补货了 / 该清仓了（头号王牌，放今日小结之前） */}
+      <AdviceCard advice={advice} products={products} />
+
       {/* 今日经营小结：打烊前看一眼，今天赚了多少 */}
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">今日经营小结</CardTitle>
-          <Link
-            to="/outbound"
-            className="text-xs font-normal text-brand-600 hover:underline"
-          >
-            查看全部 →
-          </Link>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {todaySales.rows.length === 0 ? (
-            <div className="py-6 text-center text-sm text-muted-foreground">
-              今天还没开单，第一单卖出去后这里会实时算出营业额和毛利
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-                <div className="rounded-xl bg-slate-50 px-4 py-3">
-                  <div className="text-xs text-slate-500">今日营业额</div>
-                  <div className="text-xl font-bold text-slate-800 tabular-nums">
-                    {formatPrice(todaySales.revenue)}
-                  </div>
-                </div>
-                <div className="rounded-xl bg-green-50 px-4 py-3">
-                  <div className="text-xs text-green-600">今日毛利</div>
-                  <div className="text-xl font-bold text-green-700 tabular-nums">
-                    {formatPrice(todaySales.profit)}
-                  </div>
-                </div>
-                <div className="rounded-xl bg-slate-50 px-4 py-3">
-                  <div className="text-xs text-slate-500">毛利率</div>
-                  <div className="text-xl font-bold text-slate-800 tabular-nums">
-                    {todaySales.margin !== null ? `${(todaySales.margin * 100).toFixed(1)}%` : '-'}
-                  </div>
-                </div>
-                <div className="rounded-xl bg-slate-50 px-4 py-3">
-                  <div className="text-xs text-slate-500">售出件数</div>
-                  <div className="text-xl font-bold text-slate-800 tabular-nums">
-                    {todaySales.qty}
-                  </div>
-                </div>
-              </div>
-              {/* AI 一句话打烊日报（已激活且生成成功才显示，失败静默） */}
-              {(aiLoading || aiText) && (
-                <div className="flex items-start gap-3 rounded-xl bg-gradient-to-r from-brand-700 to-brand-600 px-5 py-4 text-white shadow-card">
-                  <Sparkles className="mt-0.5 size-5 shrink-0 text-amber-300" />
-                  <div>
-                    <div className="text-xs text-white/70">AI 打烊日报 · 由 Kimi 生成</div>
-                    <div className="mt-1 text-[15px] leading-relaxed">
-                      {aiLoading ? 'AI 正在算今天的账…' : aiText}
-                    </div>
-                  </div>
-                </div>
-              )}
-              {todaySales.rows.length > 6 && (
-                <div className="text-xs text-muted-foreground">
-                  共 {todaySales.rows.length} 条出入账记录，表格内下滑查看全部
-                </div>
-              )}
-              <div className="max-h-80 overflow-auto rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-20">时间</TableHead>
-                      <TableHead>商品</TableHead>
-                      <TableHead className="text-right">数量</TableHead>
-                      <TableHead className="text-right">营业额</TableHead>
-                      <TableHead className="text-right">毛利</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {todaySales.rows.map((r) => (
-                      <TableRow key={`${r.kind}-${r.id}`} className={r.kind === 'return' ? 'bg-red-50/60' : ''}>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {formatTime(r.time)}
-                        </TableCell>
-                        <TableCell>
-                          {r.kind === 'return' && (
-                            <span className="mr-2 rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-600">
-                              退货
-                            </span>
-                          )}
-                          <span className="mr-2">{r.name}</span>
-                          <span className="font-mono text-xs text-muted-foreground">{r.sku}</span>
-                        </TableCell>
-                        <TableCell
-                          className={`text-right ${r.kind === 'return' ? 'text-red-600' : ''}`}
-                        >
-                          {r.quantity}
-                        </TableCell>
-                        <TableCell
-                          className={`text-right tabular-nums ${r.kind === 'return' ? 'text-red-600' : ''}`}
-                        >
-                          {r.revenue !== null ? formatPrice(r.revenue) : '-'}
-                        </TableCell>
-                        <TableCell
-                          className={`text-right font-medium tabular-nums ${
-                            r.profit !== null && r.profit < 0 ? 'text-red-600' : 'text-green-700'
-                          }`}
-                        >
-                          {r.profit !== null ? formatPrice(r.profit) : '-'}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+      <TodaySalesCard summary={todaySales} paySplit={paySplit} aiLoading={aiLoading} aiText={aiText} />
 
       {/* AI 问答面板：仅已激活时渲染（组件自检） */}
       <AiPanel />

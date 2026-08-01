@@ -1,6 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { DatabaseBackup, FolderOpen, Info, CheckCircle2, Sparkles, ExternalLink, Volume2, Type, AudioLines, Mic, Ear, Loader2, MessageSquarePlus, Send, QrCode, RefreshCw } from 'lucide-react'
+import { FolderOpen, Info, Volume2, Type, AudioLines, Mic } from 'lucide-react'
 import { PageHeader } from '@/components/feedback'
 import { backend } from '@/lib/api'
 import { APP_VERSION } from '@/lib/version'
@@ -9,11 +9,15 @@ import { readWakeEnabled, writeWakeEnabled, startWakeListener, stopWakeListener 
 import { useVoiceModel, useTtsModel, useKwsModel } from '@/lib/useModelDownload'
 import { useOnline } from '@/lib/useOnline'
 import { useAppStore } from '@/store/appStore'
-import { formatRelativeTime } from '@/lib/formatters'
 import type { BackupStatus } from '@/types'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { AiAssistantCard } from './settings/AiAssistantCard'
+import { BackupCard } from './settings/BackupCard'
+import { FeedbackCard } from './settings/FeedbackCard'
+import { MobileServerCard, type ServerStatus } from './settings/MobileServerCard'
+import { ModelDownloadCard } from './settings/ModelDownloadCard'
+import { PreferenceRow } from './settings/PreferenceRow'
+import { WakeWordCard } from './settings/WakeWordCard'
 
 interface AppInfo {
   dataDir: string
@@ -21,16 +25,6 @@ interface AppInfo {
   backupDir: string
   version: string
   lastBackupAt?: number | null
-}
-
-/** 手机看店服务状态（server:status 通道返回） */
-interface ServerStatus {
-  enabled: boolean
-  running: boolean
-  port: number | null
-  ip: string
-  url: string | null
-  error?: string | null
 }
 
 export function SettingsPage() {
@@ -319,509 +313,97 @@ export function SettingsPage() {
       </Card>
 
       {/* 数据备份 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <DatabaseBackup className="size-5 text-brand-500" />
-            数据备份
-          </CardTitle>
-          <CardDescription>
-            系统每天凌晨 3:00 自动备份，并在软件正常退出前再备份一次，只保留最近 7 份。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {/* 超过 3 天没备份：卡片顶部红条提醒 */}
-          {bStatus?.stale && (
-            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
-              已经 {staleDays} 天没备份了，点下面「立即备份」备份一次——数据丢了可找不回来
-            </div>
-          )}
-
-          {/* 备份状态总览：上次时间 / 共几份 / 备份位置 */}
-          {backend && bStatus && (
-            <div className="grid grid-cols-3 gap-3 text-sm">
-              <div className="rounded-lg bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">上次备份</div>
-                <div className={`mt-0.5 font-medium ${bStatus.lastBackupAt ? 'text-slate-800' : 'text-amber-600'}`}>
-                  {bStatus.lastBackupAt ? formatRelativeTime(bStatus.lastBackupAt) : '还没有备份过'}
-                </div>
-              </div>
-              <div className="rounded-lg bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">备份份数</div>
-                <div className="mt-0.5 font-medium text-slate-800">共 {bStatus.backupCount} 份</div>
-              </div>
-              <div className="rounded-lg bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">备份位置</div>
-                <div className="mt-0.5 font-mono text-xs break-all text-slate-800">
-                  {info?.backupDir ?? '读取中…'}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-4">
-            <Button
-              onClick={handleBackup}
-              disabled={!backend || backing}
-              className="bg-brand-600 hover:bg-brand-700"
-            >
-              <DatabaseBackup className="size-4" />
-              {backing ? '备份中...' : '立即备份'}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleRestore}
-              disabled={!backend || restoring || backing}
-            >
-              {restoring ? '恢复中...' : '从备份恢复'}
-            </Button>
-            {!backend && (
-              <span className="text-sm text-muted-foreground">
-                浏览器开发模式使用 mock 数据，备份功能请在 Electron 应用中使用
-              </span>
-            )}
-          </div>
-
-          {/* 第二备份位置：硬盘坏了本机备份也会丢，强烈建议设一个 U 盘/网盘文件夹 */}
-          {backend && bStatus && (
-            bStatus.extraDir ? (
-              <div className="space-y-2 rounded-lg border border-slate-200 px-4 py-3">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span
-                    className={`inline-block size-2.5 shrink-0 rounded-full ${
-                      bStatus.extraDirOk ? 'bg-green-500' : 'bg-red-500'
-                    }`}
-                  />
-                  <span className="font-medium text-slate-800">第二备份位置</span>
-                  <span className="font-mono text-xs break-all text-slate-600">{bStatus.extraDir}</span>
-                </div>
-                <div className={`text-xs ${bStatus.extraDirOk ? 'text-green-700' : 'text-red-600'}`}>
-                  {bStatus.extraDirOk
-                    ? '状态正常：每次备份后会自动再复制一份过去'
-                    : `最近复制失败：${bStatus.extraError ?? '文件夹写不进去，U 盘是不是拔了？插上后会自动恢复'}`}
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleSetExtraDir} disabled={extraBusy}>
-                    换个位置
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={handleClearExtraDir} disabled={extraBusy}>
-                    取消第二位置
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-                <span className="flex-1 text-sm text-amber-700">
-                  第二备份位置未设置——硬盘坏了备份也会一起丢，建议选个 U 盘或网盘文件夹
-                </span>
-                <Button variant="outline" size="sm" onClick={handleSetExtraDir} disabled={extraBusy}>
-                  <FolderOpen className="size-4" />
-                  {extraBusy ? '选择中...' : '选择 U 盘/网盘文件夹'}
-                </Button>
-              </div>
-            )
-          )}
-
-          {backupResult && (
-            <div className="flex items-start gap-2 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
-              <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
-              <span>
-                备份成功：<span className="font-mono text-xs">{backupResult}</span>
-              </span>
-            </div>
-          )}
-          {error && (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
-          )}
-        </CardContent>
-      </Card>
+      <BackupCard
+        hasBackend={!!backend}
+        backupDir={info?.backupDir}
+        bStatus={bStatus}
+        staleDays={staleDays}
+        backing={backing}
+        restoring={restoring}
+        extraBusy={extraBusy}
+        backupResult={backupResult}
+        error={error}
+        onBackup={handleBackup}
+        onRestore={handleRestore}
+        onSetExtraDir={handleSetExtraDir}
+        onClearExtraDir={handleClearExtraDir}
+      />
 
       {/* 手机看店：局域网只读服务，微信扫码看账 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <QrCode className="size-5 text-brand-500" />
-            手机看店
-            {serverStatus?.running && (
-              <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-normal text-green-700">
-                运行中
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            出门或在家用手机看店里的账：今日营业额、低库存、查货位、今日流水。只读，手机上改不了数据。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <PreferenceRow
-            icon={<QrCode className="size-4 text-slate-500" />}
-            title="手机看店服务"
-            description="开启后，连同一个 WiFi 的手机扫码就能看店里的账；关掉后手机立即访问不了"
-            checked={!!serverStatus?.enabled}
-            onToggle={() => void handleServerToggle()}
-          />
-          {serverStatus?.running && serverStatus.url && (
-            <div className="flex flex-wrap items-start gap-5 rounded-lg bg-slate-50 px-4 py-4">
-              {qrDataUrl ? (
-                <img src={qrDataUrl} alt="手机看店二维码" className="size-[180px] rounded-lg border bg-white p-1" />
-              ) : (
-                <div className="flex size-[180px] items-center justify-center rounded-lg border bg-white text-xs text-muted-foreground">
-                  二维码生成中…
-                </div>
-              )}
-              <div className="space-y-2 text-sm">
-                <div className="font-medium text-slate-800">微信「扫一扫」扫这个二维码，直接打开看店页面</div>
-                <div className="text-muted-foreground">
-                  服务地址：<span className="font-mono text-xs text-brand-700">{`http://${serverStatus.ip}:${serverStatus.port}`}</span>
-                </div>
-                <div className="space-y-1 text-xs text-muted-foreground">
-                  <p>· 手机要和这台电脑连同一个 WiFi 才打得开。</p>
-                  <p>· 首次使用如弹出 Windows 防火墙提示，请点「允许」。</p>
-                  <p>· 页面每 30 秒自动刷新；可以把页面「添加到主屏幕」，像个小的看店 App。</p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRegenerateToken}
-                  disabled={serverBusy}
-                >
-                  <RefreshCw className="size-3.5" />
-                  重新生成访问密码
-                </Button>
-                <p className="text-xs text-muted-foreground">
-                  怀疑链接泄露时点这个；旧二维码和手机书签会一起失效。
-                </p>
-              </div>
-            </div>
-          )}
-          {serverStatus?.enabled && !serverStatus.running && (
-            <div className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-700">
-              服务已开启但当前没在运行{serverStatus.error ? `：${serverStatus.error}` : '（端口可能被占用，重启软件试试）'}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <MobileServerCard
+        serverStatus={serverStatus}
+        qrDataUrl={qrDataUrl}
+        serverBusy={serverBusy}
+        onToggle={() => void handleServerToggle()}
+        onRegenerateToken={handleRegenerateToken}
+      />
 
       {/* AI 助手（BYOK） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Sparkles className="size-5 text-brand-500" />
-            AI 助手（Kimi）
-            {aiConfigured && (
-              <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-normal text-green-700">
-                已激活
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            填入你自己的 Kimi API Key 即可激活 AI 打烊日报。Key 加密保存在本机；
-            你的库存和经营数据不出本机，只有日报数字会发给 Kimi 润色成一句话。
-            不填也不影响任何进销存功能。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <Input
-              type="password"
-              value={keyInput}
-              onChange={(e) => setKeyInput(e.target.value)}
-              placeholder={aiConfigured ? '已保存 Key（输入新 Key 可替换）' : '粘贴 sk- 开头的 API Key'}
-              className="w-96 font-mono text-xs"
-              disabled={!backend}
-            />
-            <Button
-              onClick={handleSaveKey}
-              disabled={!backend || aiBusy || !keyInput.trim() || !online}
-              title={online ? undefined : '当前离线，验证 Key 需要联网'}
-              className="bg-brand-600 hover:bg-brand-700"
-            >
-              {aiBusy ? '验证中...' : '保存并验证'}
-            </Button>
-            {aiConfigured && (
-              <Button variant="outline" onClick={handleClearKey}>
-                停用并删除 Key
-              </Button>
-            )}
-            {!online && (
-              <span className="text-xs text-amber-600">当前离线：AI 相关操作需要联网后可用</span>
-            )}
-          </div>
-          {aiMessage && (
-            <div
-              className={`rounded-lg px-4 py-3 text-sm ${
-                aiMessage.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
-              }`}
-            >
-              {aiMessage.text}
-            </div>
-          )}
-          <div className="space-y-1 text-xs text-muted-foreground">
-            <p>没有 Key？点这里一分钟免费申请（新用户有赠送额度，日常用每月几块钱）：</p>
-            <button
-              className="inline-flex items-center gap-1 text-brand-600 hover:underline"
-              onClick={() => backend?.invoke('app:openExternal', 'https://platform.moonshot.cn/console/api-keys')}
-            >
-              <ExternalLink className="size-3" />
-              打开 Kimi 开放平台申请页
-            </button>
-            <p>没填 Key 或断网时，AI 功能自动隐藏，进销存功能不受影响。</p>
-          </div>
-        </CardContent>
-      </Card>
+      <AiAssistantCard
+        hasBackend={!!backend}
+        aiConfigured={aiConfigured}
+        keyInput={keyInput}
+        onKeyInputChange={setKeyInput}
+        aiBusy={aiBusy}
+        aiMessage={aiMessage}
+        online={online}
+        onSaveKey={handleSaveKey}
+        onClearKey={handleClearKey}
+        onOpenExternal={(url) => void backend?.invoke('app:openExternal', url)}
+      />
 
       {/* 语音识别模型（本地离线识别） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Mic className="size-5 text-brand-500" />
-            语音识别模型
-            {voice.ready === true && (
-              <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-normal text-green-700">
-                已就绪
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            AI 助手"按住说话"用的识别模型，下载后完全离线识别，没网也能用，说话内容不出本机。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {voice.ready === true ? (
-            <div className="flex items-center gap-2 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
-              <CheckCircle2 className="size-4 shrink-0" />
-              模型已就绪（约78MB），按住说话走本地离线识别。
-            </div>
-          ) : voice.downloading ? (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm text-slate-600">
-                <Loader2 className="size-4 animate-spin" />
-                正在下载语音识别模型… {voice.percent}%
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full bg-brand-600 transition-all"
-                  style={{ width: `${voice.percent}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                onClick={voice.startDownload}
-                disabled={!backend || !online}
-                title={online ? undefined : '当前离线，下载模型需要联网'}
-                className="bg-brand-600 hover:bg-brand-700"
-              >
-                下载模型（约78MB）
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                {voice.ready === null
-                  ? '正在检查模型状态…'
-                  : '未下载：按住说话暂时走在线识别，下载后自动切换为离线识别'}
-              </span>
-            </div>
-          )}
-          {voice.error && !voice.downloading && (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{voice.error}</div>
-          )}
-        </CardContent>
-      </Card>
+      <ModelDownloadCard
+        icon={<Mic className="size-5 text-brand-500" />}
+        title="语音识别模型"
+        description={'AI 助手"按住说话"用的识别模型，下载后完全离线识别，没网也能用，说话内容不出本机。'}
+        model={voice}
+        readyText="模型已就绪（约78MB），按住说话走本地离线识别。"
+        downloadLabel="下载模型（约78MB）"
+        notReadyHint="未下载：按住说话暂时走在线识别，下载后自动切换为离线识别"
+        hasBackend={!!backend}
+        online={online}
+      />
 
       {/* 语音合成模型（本地离线播报） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <AudioLines className="size-5 text-brand-500" />
-            语音合成模型
-            {ttsModel.ready === true && (
-              <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-normal text-green-700">
-                已就绪
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            AI 助手"语音播报"用的合成模型，下载后完全离线合成，没网也能播报，比系统自带语音更自然。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {ttsModel.ready === true ? (
-            <div className="flex items-center gap-2 rounded-lg bg-green-50 px-4 py-3 text-sm text-green-700">
-              <CheckCircle2 className="size-4 shrink-0" />
-              模型已就绪（约42MB），语音播报走本地离线合成。
-            </div>
-          ) : ttsModel.downloading ? (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm text-slate-600">
-                <Loader2 className="size-4 animate-spin" />
-                正在下载语音合成模型… {ttsModel.percent}%
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full bg-brand-600 transition-all"
-                  style={{ width: `${ttsModel.percent}%` }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                onClick={ttsModel.startDownload}
-                disabled={!backend || !online}
-                title={online ? undefined : '当前离线，下载模型需要联网'}
-                className="bg-brand-600 hover:bg-brand-700"
-              >
-                下载模型（约42MB）
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                {ttsModel.ready === null
-                  ? '正在检查模型状态…'
-                  : '未下载：语音播报暂时用系统自带语音，下载后自动切换为离线合成'}
-              </span>
-            </div>
-          )}
-          {ttsModel.error && !ttsModel.downloading && (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{ttsModel.error}</div>
-          )}
-        </CardContent>
-      </Card>
+      <ModelDownloadCard
+        icon={<AudioLines className="size-5 text-brand-500" />}
+        title="语音合成模型"
+        description={'AI 助手"语音播报"用的合成模型，下载后完全离线合成，没网也能播报，比系统自带语音更自然。'}
+        model={ttsModel}
+        readyText="模型已就绪（约42MB），语音播报走本地离线合成。"
+        downloadLabel="下载模型（约42MB）"
+        notReadyHint="未下载：语音播报暂时用系统自带语音，下载后自动切换为离线合成"
+        hasBackend={!!backend}
+        online={online}
+      />
 
       {/* 唤醒词监听（实验，默认关闭） */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Ear className="size-5 text-brand-500" />
-            唤醒词监听（实验）
-            {kws.ready === true && (
-              <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-normal text-green-700">
-                模型已就绪
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            喊「小杜小杜」就能唤醒 AI 助手并自动开始录音，手上有活不用点鼠标。
-            实验功能，默认关闭；开启后麦克风会一直保持开启（系统会显示麦克风使用指示），说话内容只在本机检测，不出本机。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {kws.ready !== true && (
-            kws.downloading ? (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-sm text-slate-600">
-                  <Loader2 className="size-4 animate-spin" />
-                  正在下载唤醒词模型… {kws.percent}%
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full bg-brand-600 transition-all"
-                    style={{ width: `${kws.percent}%` }}
-                  />
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-wrap items-center gap-3">
-                <Button
-                  onClick={kws.startDownload}
-                  disabled={!backend || !online}
-                  title={online ? undefined : '当前离线，下载模型需要联网'}
-                  className="bg-brand-600 hover:bg-brand-700"
-                >
-                  下载唤醒词模型（约5MB）
-                </Button>
-                <span className="text-sm text-muted-foreground">
-                  {kws.ready === null ? '正在检查模型状态…' : '先下载模型，才能开启唤醒词监听'}
-                </span>
-              </div>
-            )
-          )}
-          {kws.error && !kws.downloading && (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{kws.error}</div>
-          )}
-          <div className={kws.ready === true ? '' : 'pointer-events-none opacity-50'}>
-            <PreferenceRow
-              icon={<Ear className="size-4 text-slate-500" />}
-              title="监听「小杜小杜」"
-              description="开启后麦克风一直保持开启，随时喊「小杜小杜」唤起 AI 助手；关闭后立即释放麦克风"
-              checked={wakeOn}
-              onToggle={() => void toggleWake()}
-            />
-          </div>
-          {wakeOn && (
-            <div className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-700">
-              监听已开启：麦克风保持开启中，喊「小杜小杜」试试。不用时建议关掉省电省资源。
-            </div>
-          )}
-          {wakeError && (
-            <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{wakeError}</div>
-          )}
-        </CardContent>
-      </Card>
+      <WakeWordCard
+        kws={kws}
+        wakeOn={wakeOn}
+        wakeError={wakeError}
+        onToggleWake={() => void toggleWake()}
+        hasBackend={!!backend}
+        online={online}
+      />
 
       {/* 意见反馈 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <MessageSquarePlus className="size-5 text-brand-500" />
-            意见反馈
-          </CardTitle>
-          <CardDescription>
-            用得不顺手、想要新功能，写两句直接发给我们。提交时会自动带上软件版本和系统信息，方便排查。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <textarea
-            value={fbMessage}
-            onChange={(e) => setFbMessage(e.target.value)}
-            placeholder="哪里不好用？想要什么功能？写几句就行"
-            rows={4}
-            disabled={!backend}
-            className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
-          />
-          <div className="flex flex-wrap items-center gap-3">
-            <Input
-              value={fbContact}
-              onChange={(e) => setFbContact(e.target.value)}
-              placeholder="留个电话/微信，方便我们回复你（选填）"
-              className="w-80"
-              disabled={!backend}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <Input
-              value={fbWebhook}
-              onChange={(e) => {
-                setFbWebhook(e.target.value)
-                localStorage.setItem('fi-feedback-webhook', e.target.value)
-              }}
-              placeholder="反馈接收地址（找阿杜要这个地址）"
-              className="w-96 font-mono text-xs"
-              disabled={!backend}
-            />
-            <Button
-              onClick={handleSendFeedback}
-              disabled={!backend || fbBusy || !fbWebhook.trim() || !fbMessage.trim()}
-              title={!fbWebhook.trim() ? '先填反馈接收地址（找阿杜要）' : undefined}
-              className="bg-brand-600 hover:bg-brand-700"
-            >
-              {fbBusy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
-              {fbBusy ? '发送中...' : '提交反馈'}
-            </Button>
-            {!fbWebhook.trim() && (
-              <span className="text-xs text-amber-600">还没填反馈接收地址，找阿杜要了填上就能提交</span>
-            )}
-          </div>
-          {fbResult && (
-            <div
-              className={`flex items-start gap-2 rounded-lg px-4 py-3 text-sm ${
-                fbResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
-              }`}
-            >
-              {fbResult.ok && <CheckCircle2 className="mt-0.5 size-4 shrink-0" />}
-              {fbResult.text}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <FeedbackCard
+        hasBackend={!!backend}
+        message={fbMessage}
+        onMessageChange={setFbMessage}
+        contact={fbContact}
+        onContactChange={setFbContact}
+        webhook={fbWebhook}
+        onWebhookChange={(v) => {
+          setFbWebhook(v)
+          localStorage.setItem('fi-feedback-webhook', v)
+        }}
+        busy={fbBusy}
+        result={fbResult}
+        onSend={handleSendFeedback}
+      />
 
       {/* 数据位置 */}
       <Card>
@@ -868,47 +450,5 @@ export function SettingsPage() {
         </CardContent>
       </Card>
     </div>
-  )
-}
-
-/** 偏好设置行：标题 + 说明 + 右侧开关（整行可点） */
-function PreferenceRow({
-  icon,
-  title,
-  description,
-  checked,
-  onToggle,
-}: {
-  icon: ReactNode
-  title: string
-  description: string
-  checked: boolean
-  onToggle: () => void
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={onToggle}
-      className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-slate-50"
-    >
-      {icon}
-      <span className="flex-1">
-        <span className="block text-sm font-medium text-slate-800">{title}</span>
-        <span className="block text-xs text-muted-foreground">{description}</span>
-      </span>
-      <span
-        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-          checked ? 'bg-brand-600' : 'bg-slate-300'
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 size-5 rounded-full bg-white shadow transition-all ${
-            checked ? 'left-[22px]' : 'left-0.5'
-          }`}
-        />
-      </span>
-    </button>
   )
 }

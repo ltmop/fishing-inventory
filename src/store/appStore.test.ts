@@ -291,6 +291,122 @@ describe('赊账出库（mock 路径）', () => {
   })
 })
 
+// ---------- 一单多商品收银台（mock 回退路径） ----------
+const cartProduct2: Product = {
+  ...baseProduct,
+  id: 2,
+  sku_code: 'JC-FG-SG-GW-002',
+  brand: '测试',
+  model: '鱼线 0.8号',
+  cost_price: 500,
+  suggest_price: 900,
+}
+const cartBatches2: InventoryBatch[] = [
+  { id: 3, product_id: 2, batch_no: 'PO20260705-001', quantity: 2, cost_price: 500, location: null, inbound_date: '2026-07-05', supplier_id: null },
+]
+const seedCartCustomer = { ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }
+function seedTwoProducts(withCustomer = false) {
+  seed({
+    products: [structuredClone(baseProduct), structuredClone(cartProduct2)],
+    batches: [...structuredClone(baseBatches), ...structuredClone(cartBatches2)],
+    customers: withCustomer ? [{ ...seedCartCustomer }] : [],
+  })
+}
+
+describe('checkout 收银台（mock 路径：一单多商品）', () => {
+  it('多样一单：逐行扣库存、逐行落流水、到账方式一致', async () => {
+    seedTwoProducts()
+    const r = await useAppStore.getState().checkout(
+      [
+        { productId: 1, quantity: 4, sellingPrice: 8000 },
+        { productId: 2, quantity: 2, sellingPrice: 900 },
+      ],
+      '测试员',
+      { payMethod: '微信' },
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.totalDue).toBe(33800)
+      expect(r.creditAmount).toBe(0)
+    }
+    const s = useAppStore.getState()
+    expect(s.batches.find((b) => b.id === 1)!.quantity).toBe(0)
+    expect(s.batches.find((b) => b.id === 2)!.quantity).toBe(4)
+    expect(s.batches.find((b) => b.id === 3)!.quantity).toBe(0)
+    const outs = s.transactions.filter((t) => t.type === 'out')
+    expect(outs).toHaveLength(3) // 商品1跨两批次拆 2 行 + 商品2 一行
+    expect(outs.every((t) => t.pay_method === '微信')).toBe(true)
+    expect(outs.every((t) => t.paid_amount == null)).toBe(true)
+  })
+
+  it('任一行缺货：整单不动并列出缺货明细', async () => {
+    seedTwoProducts()
+    const before = useAppStore.getState()
+    const r = await useAppStore.getState().checkout(
+      [
+        { productId: 1, quantity: 2, sellingPrice: 8000 },
+        { productId: 2, quantity: 99, sellingPrice: 900 },
+      ],
+      '测试员',
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.shortages).toHaveLength(1)
+      expect(r.shortages[0].productId).toBe(2)
+      expect(r.shortages[0].shortage).toBe(97)
+    }
+    const after = useAppStore.getState()
+    expect(after.batches).toEqual(before.batches)
+    expect(after.transactions).toHaveLength(0)
+  })
+
+  it('赊账一单：实收按行顺序摊销，欠款=应付-实收', async () => {
+    seedTwoProducts(true)
+    // 应付 2×8000 + 1×900 = 16900，实收 10000 → 商品1 行摊满 10000，商品2 行摊 0
+    const r = await useAppStore.getState().checkout(
+      [
+        { productId: 1, quantity: 2, sellingPrice: 8000 },
+        { productId: 2, quantity: 1, sellingPrice: 900 },
+      ],
+      '测试员',
+      { customerId: 1, paidAmount: 10000, payMethod: '现金' },
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.totalDue).toBe(16900)
+      expect(r.creditAmount).toBe(6900)
+    }
+    const s = useAppStore.getState()
+    const paids = s.transactions
+      .filter((t) => t.type === 'out')
+      .map((t) => t.paid_amount ?? -1)
+      .sort((a, b) => a - b)
+    expect(paids).toEqual([0, 10000])
+    expect(s.customers.find((c) => c.id === 1)!.outstanding).toBe(6900)
+  })
+
+  it('纯赊账：到账方式强制落空，欠款=全额', async () => {
+    seedTwoProducts(true)
+    const r = await useAppStore.getState().checkout(
+      [{ productId: 1, quantity: 1, sellingPrice: 8000 }],
+      '测试员',
+      { customerId: 1, paidAmount: 0, payMethod: '现金' },
+    )
+    expect(r.ok).toBe(true)
+    const tx = useAppStore.getState().transactions.find((t) => t.type === 'out')!
+    expect(tx.pay_method).toBeNull()
+    expect(tx.paid_amount).toBe(0)
+    expect(useAppStore.getState().customers.find((c) => c.id === 1)!.outstanding).toBe(8000)
+  })
+
+  it('散客部分付款被拒：赊账必须选客户', async () => {
+    seedTwoProducts()
+    await expect(
+      useAppStore.getState().checkout([{ productId: 1, quantity: 1, sellingPrice: 8000 }], '测试员', { paidAmount: 100 }),
+    ).rejects.toThrow('赊账必须选客户')
+  })
+})
+
 describe('还账 / 赊账退货冲减（mock 路径）', () => {
   async function seedWithDebt() {
     seed({ customers: [{ ...baseCustomer, outstanding: 0, total_credit: 0, total_paid_back: 0, last_deal_at: null }] })
@@ -628,5 +744,146 @@ describe('换货差价（mock 路径）', () => {
     const diffTx = useAppStore.getState().transactions.find((t) => t.type === 'exchange')!
     expect(diffTx.customer_id).toBeNull()
     expect(diffTx.paid_amount).toBe(-3000)
+  })
+})
+
+
+describe('batchUpdateProducts（mock 路径）', () => {
+  const product2: Product = {
+    ...structuredClone(baseProduct),
+    id: 2,
+    sku_code: 'JC-XL-PL-001',
+    brand: '批量牌',
+    model: '线B',
+    suggest_price: 999,
+  }
+  // 无建议售价的商品：打折时保持 NULL，不补建档次
+  const product3: Product = {
+    ...structuredClone(baseProduct),
+    id: 3,
+    sku_code: 'JC-YG-PL-001',
+    brand: '批量牌',
+    model: '钩C',
+    suggest_price: null,
+  }
+  const tierSeed: PriceTier[] = [
+    { id: 1, product_id: 1, tier: 'VIP', price: 1500 },
+    { id: 2, product_id: 2, tier: 'wholesale', price: 777 },
+  ]
+  const seedBatch = () =>
+    seed({
+      products: [structuredClone(baseProduct), structuredClone(product2), structuredClone(product3)],
+      priceTiers: structuredClone(tierSeed),
+    })
+
+  it('统一打折：建议售价与已设档次价同步四舍五入，并记一条批量改价日志', async () => {
+    seedBatch()
+    const r = await useAppStore.getState().batchUpdateProducts({
+      ids: [1, 2, 3],
+      priceMode: { kind: 'ratio', ratio: 0.9 },
+    })
+    expect(r).toEqual({ ok: true, updated: 3, tiersUpdated: 2 })
+    const s = useAppStore.getState()
+    expect(s.products.find((p) => p.id === 1)!.suggest_price).toBe(7650) // 8500×0.9
+    expect(s.products.find((p) => p.id === 2)!.suggest_price).toBe(899) // 999×0.9=899.1→899
+    expect(s.products.find((p) => p.id === 3)!.suggest_price).toBeNull() // 没设的不补
+    expect(s.priceTiers.find((t) => t.product_id === 1)!.price).toBe(1350) // 1500×0.9
+    expect(s.priceTiers.find((t) => t.product_id === 2)!.price).toBe(699) // 777×0.9=699.3→699
+    const logs = s.auditLogs.filter((l) => l.action === '批量改价')
+    expect(logs).toHaveLength(1)
+    expect(logs[0].entity).toContain('3 个商品')
+  })
+
+  it('统一改价：建议售价与档次价都改成固定价', async () => {
+    seedBatch()
+    await useAppStore.getState().batchUpdateProducts({
+      ids: [1, 2],
+      priceMode: { kind: 'fixed', priceFen: 500 },
+    })
+    const s = useAppStore.getState()
+    expect(s.products.find((p) => p.id === 1)!.suggest_price).toBe(500)
+    expect(s.products.find((p) => p.id === 2)!.suggest_price).toBe(500)
+    expect(s.priceTiers.every((t) => t.price === 500)).toBe(true)
+    expect(s.products.find((p) => p.id === 3)!.suggest_price).toBeNull() // 不在名单里不动
+  })
+
+  it('批量改状态：只动选中商品，记一条批量改状态日志', async () => {
+    seedBatch()
+    await useAppStore.getState().batchUpdateProducts({ ids: [1, 3], status: '停产' })
+    const s = useAppStore.getState()
+    expect(s.products.find((p) => p.id === 1)!.status).toBe('停产')
+    expect(s.products.find((p) => p.id === 3)!.status).toBe('停产')
+    expect(s.products.find((p) => p.id === 2)!.status).toBe('已盘点')
+    const logs = s.auditLogs.filter((l) => l.action === '批量改状态')
+    expect(logs).toHaveLength(1)
+    expect(logs[0].entity).toContain('2 个商品')
+    expect(logs[0].entity).toContain('停产')
+  })
+
+  it('非法参数抛错：空列表 / 什么都不传 / 坏折扣 / 负统一价 / 非法状态 / 商品不存在', async () => {
+    seedBatch()
+    const st = useAppStore.getState()
+    await expect(st.batchUpdateProducts({ ids: [], priceMode: { kind: 'ratio', ratio: 0.9 } })).rejects.toThrow()
+    await expect(st.batchUpdateProducts({ ids: [1] })).rejects.toThrow()
+    await expect(st.batchUpdateProducts({ ids: [1], priceMode: { kind: 'ratio', ratio: 0 } })).rejects.toThrow()
+    await expect(st.batchUpdateProducts({ ids: [1], priceMode: { kind: 'fixed', priceFen: -5 } })).rejects.toThrow()
+    // @ts-expect-error 故意传非法状态
+    await expect(st.batchUpdateProducts({ ids: [1], status: '在售' })).rejects.toThrow()
+    const before = useAppStore.getState()
+    await expect(
+      st.batchUpdateProducts({ ids: [1, 999999], priceMode: { kind: 'ratio', ratio: 0.5 } }),
+    ).rejects.toThrow('商品不存在')
+    // 失败不落任何修改
+    const after = useAppStore.getState()
+    expect(after.products).toEqual(before.products)
+    expect(after.priceTiers).toEqual(before.priceTiers)
+    expect(after.auditLogs).toEqual(before.auditLogs)
+  })
+})
+
+
+describe('支出记账（mock 路径）', () => {
+  const sup = { id: 1, name: '测试供应商', contact: null, phone: null, address: null, notes: null }
+
+  it('记/改/删一笔支出，日期默认今天', async () => {
+    seed({ expenses: [], suppliers: [sup] })
+    const st = useAppStore.getState()
+    const e = await st.addExpense({
+      category: '房租', amount: 280000, method: '现金', note: '7月房租', supplierId: 1,
+    })
+    expect(e.id).toBeGreaterThan(0)
+    expect(e.expense_date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(e.supplier_name).toBe('测试供应商')
+    expect(useAppStore.getState().expenses).toHaveLength(1)
+
+    await useAppStore.getState().updateExpense(e.id, {
+      category: '水电', amount: 18600, method: '微信', expenseDate: '2026-07-15',
+    })
+    const updated = useAppStore.getState().expenses[0]
+    expect(updated.category).toBe('水电')
+    expect(updated.amount).toBe(18600)
+    expect(updated.expense_date).toBe('2026-07-15')
+    expect(updated.supplier_id).toBeNull()
+
+    await useAppStore.getState().deleteExpense(e.id)
+    expect(useAppStore.getState().expenses).toHaveLength(0)
+    await expect(useAppStore.getState().deleteExpense(e.id)).rejects.toThrow('不存在')
+  })
+
+  it('非法参数抛错：坏分类 / 零金额 / 坏方式 / 坏日期 / 供应商不存在', async () => {
+    seed({ expenses: [], suppliers: [] })
+    const st = useAppStore.getState()
+    // @ts-expect-error 故意传非法分类
+    await expect(st.addExpense({ category: '旅游', amount: 100, method: '现金' })).rejects.toThrow('分类')
+    await expect(st.addExpense({ category: '房租', amount: 0, method: '现金' })).rejects.toThrow('金额')
+    // @ts-expect-error 故意传非法方式
+    await expect(st.addExpense({ category: '房租', amount: 100, method: '刷卡' })).rejects.toThrow('方式')
+    await expect(
+      st.addExpense({ category: '房租', amount: 100, method: '现金', expenseDate: '昨天' }),
+    ).rejects.toThrow('日期')
+    await expect(
+      st.addExpense({ category: '进货付款', amount: 100, method: '现金', supplierId: 999 }),
+    ).rejects.toThrow('供应商')
+    expect(useAppStore.getState().expenses).toHaveLength(0)
   })
 })

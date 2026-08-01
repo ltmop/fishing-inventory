@@ -121,6 +121,7 @@ export interface Transaction {
   notes: string | null
   customer_id?: number | null // 赊账包：赊账/记账客户；散客为 null
   paid_amount?: number | null // 单位：分；实收金额，null=已全额付清（含赊账前的老数据）
+  pay_method?: PaymentMethod | null // 收款/退款方式；null=未记录或没有现金移动（纯赊/冲减欠款）
 }
 
 // ---------- 赊账包：客户与还款（客户余额模型） ----------
@@ -147,6 +148,27 @@ export type PaymentMethod = '现金' | '微信' | '支付宝' | '其他'
 
 export const PAYMENT_METHODS: PaymentMethod[] = ['现金', '微信', '支付宝', '其他']
 
+// ---------- 一单多商品收银台 ----------
+
+/** 收银台一行商品：售价必填（分），营业额/毛利全靠它 */
+export interface CheckoutLine {
+  productId: number
+  quantity: number
+  sellingPrice: number // 单位：分
+}
+
+/** 库存不足时收银台返回的缺货明细（哪样不够、差多少） */
+export interface CheckoutShortage {
+  productId: number
+  name: string
+  shortage: number
+}
+
+export type CheckoutResult =
+  | { ok: true; lines: unknown[]; totalDue: number; paidAmount: number | null; creditAmount: number }
+  | { ok: false; shortages: CheckoutShortage[] }
+
+
 export interface Payment {
   id: number
   customer_id: number
@@ -154,6 +176,34 @@ export interface Payment {
   method: PaymentMethod
   notes: string | null
   created_at: string
+}
+
+// ---------- 支出记账（v1.10） ----------
+
+export type ExpenseCategory = '进货付款' | '房租' | '水电' | '运费' | '人工' | '杂项'
+export const EXPENSE_CATEGORIES: ExpenseCategory[] = ['进货付款', '房租', '水电', '运费', '人工', '杂项']
+
+export interface Expense {
+  id: number
+  category: ExpenseCategory
+  amount: number // 单位：分
+  method: PaymentMethod
+  supplier_id: number | null
+  supplier_name?: string | null // 列表/单条查询时 JOIN 带出
+  note: string | null
+  expense_date: string // 本地日期 YYYY-MM-DD
+  operator: string | null
+  created_at: string
+}
+
+/** 支出表单输入（新增/编辑共用；amount 单位分，页面从元换算） */
+export interface ExpenseInput {
+  category: ExpenseCategory
+  amount: number
+  method: PaymentMethod
+  supplierId?: number | null
+  note?: string | null
+  expenseDate?: string
 }
 
 /** 对账单赊销明细行（customer:statement 的 sales 元素）；退货行 owed 为负（退货后少欠） */
