@@ -1,5 +1,6 @@
 // 主进程：窗口生命周期 + 数据库装配 + IPC 注册 + 退出收尾
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron'
+import * as Sentry from '@sentry/electron/main'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -16,6 +17,8 @@ import { backupNow, backupNowAsync, scheduleDailyBackup, restoreBackup, backupSt
 import * as feedback from './feedback.js'
 import { createInventoryServer } from './server.js'
 import { createPhotoStore } from './photo.js'
+import { initAutoUpdater, checkForUpdates, downloadAndInstall } from './updater.js'
+import { loadLicense, activateLicense, machineFingerprint } from './license.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -284,6 +287,43 @@ function registerIpc() {
     inventoryServer ? inventoryServer.setEnabled(!!p?.enabled) : { enabled: false, running: false },
   )
   ipcMain.handle('server:regenerateToken', () => inventoryServer?.regenerateToken() ?? null)
+  // 自动更新通道：检查 / 下载安装（挂掉静默降级）
+  ipcMain.handle('update:check', async () => {
+    try { return await checkForUpdates() } catch { return { checkedAt: new Date().toISOString() } }
+  })
+  ipcMain.handle('update:downloadAndInstall', async () => {
+    try { await downloadAndInstall() } catch (e) { throw new Error(e?.message ?? '下载失败') }
+  })
+  // 授权通道：状态查询 / 激活码验证
+  ipcMain.handle('license:status', () => {
+    try { return loadLicense(dataDir) } catch { return { activated: false, level: 'free', expiresAt: null, machineId: machineFingerprint(), daysLeft: null } }
+  })
+  ipcMain.handle('license:activate', (_e, p) => {
+    try {
+      const r = activateLicense(dataDir, p?.code ?? '')
+      return r.ok ? { ok: true, license: r.license } : { ok: false, error: r.error }
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  })
+  // 新手引导通道
+  ipcMain.handle('onboarding:status', () => {
+    try { return commands.onboardingStatus(db) } catch { return { completed: false } }
+  })
+  ipcMain.handle('onboarding:finish', () => {
+    try { return commands.finishOnboarding(db) } catch { return { ok: false } }
+  })
+  ipcMain.handle('onboarding:reset', () => {
+    try {
+      // 清空前强制备份
+      import('./backup.js').then(({ backupNow }) => {
+        try { backupNow(db, dbPath, backupDir) } catch { /* 备份失败不阻断清空 */ }
+      })
+      return commands.resetDemoData(db)
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  })
   // 应用信息（设置页展示数据位置 + 最近备份时间：扫描备份目录最新文件）
   ipcMain.handle('app:info', () => {
     let lastBackupAt = null
@@ -358,6 +398,21 @@ app.whenReady().then(() => {
     const isLocal = url.startsWith('file://') || (devUrl && url.startsWith(devUrl))
     callback(permission === 'media' && !!isLocal)
   })
+  // 崩溃上报：DSN 从环境变量取，未配置/初始化失败静默降级——绝不影响启动
+  try {
+    if (process.env.SENTRY_DSN) {
+      Sentry.init({
+        dsn: process.env.SENTRY_DSN,
+        release: app.getVersion(),
+        // 不上报用户数据（数据库路径/客户信息等），只上报堆栈
+        beforeSend(event) {
+          // 清除可能含敏感信息的 URL 参数
+          if (event.request?.url) event.request.url = event.request.url.replace(/[?&].*/, '')
+          return event
+        },
+      })
+    }
+  } catch { /* 挂了是免费版，不是打不开 */ }
     // 启动崩溃防护：数据库打不开（如老库迁移失败）时给出明确提示再退出，不无声崩溃
   try {
     db = openDatabase(dbPath)
@@ -382,6 +437,8 @@ app.whenReady().then(() => {
     reportBackupError('自动备份失败', e),
   getExtraDir)
   createWindow()
+  // 自动更新：COS generic provider，try/catch 包裹——挂掉静默降级
+  try { initAutoUpdater() } catch { /* 挂了是手动更新，不是打不开 */ }
   // 模型已就绪则在启动时预加载识别器（约 1s），首次按住说话零等待；模型缺失静默跳过
   voice.preloadRecognizer()
   // TTS 模型已就绪同样预加载合成器，首次播报零等待；缺失静默跳过（播报回退系统语音）

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
-import { FolderOpen, Info, Volume2, Type, AudioLines, Mic } from 'lucide-react'
+import { FolderOpen, Info, Key, Volume2, Type, AudioLines, Mic } from 'lucide-react'
 import { PageHeader } from '@/components/feedback'
 import { backend } from '@/lib/api'
 import { APP_VERSION } from '@/lib/version'
@@ -8,6 +9,7 @@ import { readTtsEnabled, writeTtsEnabled } from '@/lib/tts'
 import { readWakeEnabled, writeWakeEnabled, startWakeListener, stopWakeListener } from '@/lib/wakeWord'
 import { useVoiceModel, useTtsModel, useKwsModel } from '@/lib/useModelDownload'
 import { useOnline } from '@/lib/useOnline'
+import { useLicense, daysText } from '@/lib/license'
 import { useAppStore } from '@/store/appStore'
 import type { BackupStatus } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -28,6 +30,8 @@ interface AppInfo {
 }
 
 export function SettingsPage() {
+  const navigate = useNavigate()
+  const license = useLicense()
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [backing, setBacking] = useState(false)
   const [restoring, setRestoring] = useState(false)
@@ -57,6 +61,28 @@ export function SettingsPage() {
   const [aiMessage, setAiMessage] = useState<{ ok: boolean; text: string } | null>(null)
   // 离线时联网功能（AI 验证、申请 Key）置灰
   const online = useOnline()
+
+  // 自动更新：设置页手动检查
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [lastCheckAt, setLastCheckAt] = useState('')
+  const [updateMsg, setUpdateMsg] = useState('')
+  const checkUpdate = async () => {
+    if (updateChecking) return
+    setUpdateChecking(true)
+    setUpdateMsg('')
+    try {
+      const r = backend
+        ? await backend.invoke('update:check')
+        : { version: null, checkedAt: new Date().toISOString() }
+      const t = new Date(r.checkedAt)
+      setLastCheckAt(`${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`)
+      setUpdateMsg(r.version && r.version !== APP_VERSION ? `发现新版本 v${r.version}` : '已是最新')
+    } catch {
+      setUpdateMsg('检查失败，请稍后再试')
+    } finally {
+      setUpdateChecking(false)
+    }
+  }
 
   // 语音识别模型状态（本地 sherpa-onnx 离线识别）
   const voice = useVoiceModel()
@@ -434,6 +460,50 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* 激活与授权 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Key className="size-5 text-amber-500" />
+            激活与授权
+          </CardTitle>
+          <CardDescription>
+            {license.activated
+              ? `Pro 已激活 · ${daysText(license.daysLeft)}`
+              : '免费版 · 所有基础功能永久免费'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <div className="space-y-1 text-sm">
+              <div className="text-slate-600">
+                状态：
+                <span className={license.activated ? 'font-medium text-green-700' : 'text-slate-500'}>
+                  {license.activated ? `Pro · ${daysText(license.daysLeft)}` : '免费版'}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                机器 ID：{license.machineId || '仅桌面端可用'}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => navigate('/onboarding')}
+                className="rounded bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-200 cursor-pointer"
+              >
+                新手引导
+              </button>
+              <button
+                onClick={() => navigate('/activate')}
+                className="rounded bg-brand-100 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-200 cursor-pointer"
+              >
+                {license.activated ? '管理授权' : '升级 Pro'}
+              </button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* 关于 */}
       <Card>
         <CardHeader>
@@ -442,10 +512,24 @@ export function SettingsPage() {
             关于
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-1 text-sm text-slate-600">
+        <CardContent className="space-y-2 text-sm text-slate-600">
           <div>渔具库存 AI 管理系统 v{APP_VERSION} · 阿杜 © 2026</div>
           <div className="text-xs text-muted-foreground">
             Electron + React + SQLite（WAL）· 本地单机部署 · 断电不丢数据
+          </div>
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              onClick={checkUpdate}
+              disabled={updateChecking}
+              className="rounded bg-brand-100 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-200 disabled:opacity-50 cursor-pointer"
+            >
+              {updateChecking ? '检查中...' : '检查更新'}
+            </button>
+            {lastCheckAt && (
+              <span className="text-xs text-muted-foreground">
+                上次检查 {lastCheckAt}，{updateMsg}
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>

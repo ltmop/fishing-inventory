@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { HashRouter, Route, Routes } from 'react-router-dom'
+import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { SplashScreen } from '@/components/SplashScreen'
 import { Layout } from '@/components/layout/Layout'
@@ -17,6 +17,8 @@ import { SettingsPage } from '@/pages/SettingsPage'
 import { ImportPage } from '@/pages/ImportPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { ReportsPage } from '@/pages/ReportsPage'
+import { ActivationPage } from '@/pages/ActivationPage'
+import { OnboardingPage } from '@/pages/OnboardingPage'
 import { computeCustomerStats, useAppStore } from '@/store/appStore'
 import { backend } from '@/lib/api'
 import {
@@ -34,6 +36,23 @@ import {
   mockSuppliers,
   mockTransactions,
 } from '@/lib/mock-data'
+
+/** 新手引导守门：首次启动未完成引导 → 跳 /onboarding；已完成后每次渲染 Dashboard */
+function OnboardingGuard() {
+  const [status, setStatus] = useState<{ checked: boolean; need: boolean }>({ checked: false, need: false })
+  useEffect(() => {
+    if (backend) {
+      backend.invoke('onboarding:status').then((s) => {
+        setStatus({ checked: true, need: !s?.completed })
+      }).catch(() => setStatus({ checked: true, need: false }))
+    } else {
+      setStatus({ checked: true, need: false })
+    }
+  }, [])
+  if (!status.checked) return null
+  if (status.need) return <Navigate to="/onboarding" replace />
+  return <DashboardPage />
+}
 
 function App() {
   const loadAll = useAppStore((s) => s.loadAll)
@@ -88,7 +107,7 @@ function App() {
       <HashRouter>
         <Routes>
           <Route element={<Layout />}>
-            <Route index element={<DashboardPage />} />
+            <Route index element={<OnboardingGuard />} />
             <Route path="reports" element={<ReportsPage />} />
             <Route path="inbound" element={<InboundPage />} />
             <Route path="outbound" element={<OutboundPage />} />
@@ -103,6 +122,9 @@ function App() {
             <Route path="settings" element={<SettingsPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
+          {/* 激活页 + 新手引导：独立全屏，不走 Layout */}
+          <Route path="activate" element={<ActivationPage />} />
+          <Route path="onboarding" element={<OnboardingPage />} />
         </Routes>
       </HashRouter>
       )}

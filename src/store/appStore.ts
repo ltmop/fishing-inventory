@@ -167,6 +167,10 @@ interface AppState {
   lowStockAlertShown: boolean
   setLowStockAlertOpen: (open: boolean) => void
 
+  /** 授权状态（license:status IPC）；浏览器 mock 默认免费 */
+  license: { activated: boolean; level: 'free' | 'pro'; expiresAt: string | null; machineId: string; daysLeft: number | null }
+  setLicense: (s: { activated: boolean; level: 'free' | 'pro'; expiresAt: string | null; machineId: string; daysLeft: number | null }) => void
+
   /** Electron 环境启动时调用一次：从 SQLite 拉全量数据进 store */
   loadAll: () => Promise<void>
 
@@ -450,6 +454,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   lowStockAlertOpen: false,
   lowStockAlertShown: false,
   setLowStockAlertOpen: (open) => set({ lowStockAlertOpen: open }),
+
+  license: { activated: false, level: 'free', expiresAt: null, machineId: '', daysLeft: null },
+  setLicense: (s) => set({ license: s }),
 
   loadAll: async () => {
     if (!backend) return

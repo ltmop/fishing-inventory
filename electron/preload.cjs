@@ -73,6 +73,13 @@ const CHANNELS = new Set([
   'server:status',
   'server:toggle',
   'server:regenerateToken',
+  'update:check',
+  'update:downloadAndInstall',
+  'license:status',
+  'license:activate',
+  'onboarding:status',
+  'onboarding:reset',
+  'onboarding:finish',
 ])
 
 contextBridge.exposeInMainWorld('fi', {

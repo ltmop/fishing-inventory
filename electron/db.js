@@ -204,6 +204,12 @@ CREATE TABLE IF NOT EXISTS ai_insights (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 应用设置表（v1.13）：新手引导标记、授权偏好等；CREATE IF NOT EXISTS 兼容老库
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT UNIQUE NOT NULL,
+    value TEXT NOT NULL
+);
+
 -- 支出记账（v1.10）：进货付款/房租/水电/运费/人工/杂项，金额单位分；
 -- 净利 = 毛利 − 支出（经营报表口径）。老库靠 CREATE TABLE IF NOT EXISTS 直接建表，无需迁移
 CREATE TABLE IF NOT EXISTS expenses (
