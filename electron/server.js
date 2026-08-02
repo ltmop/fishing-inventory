@@ -9,6 +9,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+
+// ESM 无 __dirname，这里补一个（serveMobile 托管 electron/mobile/ 用）
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 import { confirmOutbound, listCustomers, lowStockProducts, auditLog, supplierStatement, todayPaymentSplit } from './commands.js'
 import * as cmds from './commands.js'
 import { createPhotoStore } from './photo.js'

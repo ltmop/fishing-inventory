@@ -3,7 +3,7 @@
 // electron-updater 是 CJS 包（main=out/main.js），ESM 命名导入拿不到 autoUpdater，
 // 必须走 default 导入再解构（打包环境已实测命名导入直接启动崩溃）
 import electronUpdater from 'electron-updater'
-import { dialog } from 'electron'
+import { dialog, BrowserWindow } from 'electron'
 
 const { autoUpdater } = electronUpdater
 
@@ -18,7 +18,7 @@ export function initAutoUpdater() {
 
     autoUpdater.on('update-available', (info) => {
       // 通知渲染进程弹出 UpdateBanner
-      for (const win of require('electron').BrowserWindow.getAllWindows()) {
+      for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send('update:available', {
           version: info.version,
           releaseDate: info.releaseDate,
@@ -27,7 +27,7 @@ export function initAutoUpdater() {
     })
 
     autoUpdater.on('update-not-available', () => {
-      for (const win of require('electron').BrowserWindow.getAllWindows()) {
+      for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send('update:not-available', { checkedAt: new Date().toISOString() })
       }
     })
@@ -37,7 +37,7 @@ export function initAutoUpdater() {
     })
 
     autoUpdater.on('download-progress', (progress) => {
-      for (const win of require('electron').BrowserWindow.getAllWindows()) {
+      for (const win of BrowserWindow.getAllWindows()) {
         win.webContents.send('update:progress', { percent: Math.round(progress.percent) })
       }
     })

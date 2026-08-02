@@ -15,24 +15,48 @@ process.env.PATH = `${windir}\\System32;${windir}\\System32\\WindowsPowerShell\\
 
 const tmpOut = path.join(os.tmpdir(), 'fi-release')
 
-/** 打包前哨兵：主进程所有 .js/.cjs 必须过 node --check（tsc/vitest 都覆盖不到 electron/） */
+/** 递归收集目录下所有 .js/.cjs 文件 */
+function collectJs(dir) {
+  if (!fs.existsSync(dir)) return []
+  const out = []
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name)
+    const st = fs.statSync(p)
+    if (st.isDirectory()) out.push(...collectJs(p))
+    else if (/\.(js|cjs)$/.test(name)) out.push(p)
+  }
+  return out
+}
+
+/** 打包前哨兵：
+ *  1) 所有 electron/ 下 .js/.cjs 过 node --check（tsc/vitest 都覆盖不到 electron/）
+ *  2) 运行时引用检查：ESM 文件里出现裸 require() 会在运行时抛 ReferenceError（node --check 检不出）
+ *  3) __dirname / __filename 未定义就被使用同样会运行时崩（ESM 没有它们）
+ */
 function syntaxCheckMainProcess() {
-  const dir = path.resolve('electron')
-  const files = []
-  for (const f of fs.readdirSync(dir)) {
-    if (/\.(js|cjs)$/.test(f)) files.push(path.join(dir, f))
-  }
-  for (const f of fs.readdirSync(path.join(dir, 'lib')).map((f) => path.join(dir, 'lib', f))) {
-    if (/\.(js|cjs)$/.test(f)) files.push(f)
-  }
+  const files = collectJs(path.resolve('electron'))
+  if (files.length === 0) throw new Error('electron/ 目录为空，打包前哨兵没扫到文件')
   for (const f of files) {
     try {
       execSync(`node --check "${f}"`, { stdio: 'pipe' })
     } catch (e) {
       throw new Error(`主进程语法检查失败: ${f}\n${e.stderr?.toString() ?? e.message}`)
     }
+    // ESM 裸 require 检测（.cjs 允许 require，跳过）
+    if (f.endsWith('.js')) {
+      const src = fs.readFileSync(f, 'utf8')
+      const requireHits = src.match(/\brequire\s*\(\s*['"]/g) || []
+      const hasCreateRequire = /createRequire|module\.createRequire/.test(src)
+      if (requireHits.length > 0 && !hasCreateRequire) {
+        throw new Error(`ESM 文件出现裸 require()，运行时必崩: ${f}（${requireHits.length} 处）`)
+      }
+      // __dirname/__filename 使用但未定义检测
+      if (/\b__dirname\b|\b__filename\b/.test(src) && !/fileURLToPath/.test(src)) {
+        throw new Error(`ESM 文件使用了 __dirname/__filename 但未定义（缺 fileURLToPath 导入）: ${f}`)
+      }
+    }
   }
-  console.log(`✓ 主进程 ${files.length} 个文件语法检查通过`)
+  console.log(`✓ 主进程 ${files.length} 个文件语法+运行时引用检查通过`)
 }
 
 ;(async () => {
