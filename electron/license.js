@@ -18,7 +18,7 @@ MCowBQYDK2VwAyEAo9q3xL8kF2mN1pV7bW6cR0eT4yU5hJ2dA8fG3sH1wK0=
 const PUBLIC_KEY_FILE = path.join(os.homedir(), '.fishing-inventory', 'license-public.pem')
 
 /** 计算机器指纹：hostname + CPU 型号 + 网络 MAC → SHA256 前12位大写 */
-export function machineFingerprint(): string {
+export function machineFingerprint() {
   try {
     const parts = [
       os.hostname(),
@@ -40,16 +40,9 @@ export function machineFingerprint(): string {
   }
 }
 
-interface LicenseInfo {
-  activated: boolean
-  level: 'free' | 'pro'
-  expiresAt: string | null // ISO 8601
-  machineId: string
-  daysLeft: number | null
-}
 
 /** 读取公钥（优先外部文件，可热升级） */
-function loadPublicKey(): string {
+function loadPublicKey() {
   try {
     if (fs.existsSync(PUBLIC_KEY_FILE)) {
       return fs.readFileSync(PUBLIC_KEY_FILE, 'utf8')
@@ -59,7 +52,7 @@ function loadPublicKey(): string {
 }
 
 /** Ed25519 验签激活码是否有效 */
-export function verifyLicenseCode(code: string, machineId: string): { valid: boolean; level?: 'pro'; expiresAt?: string; error?: string } {
+export function verifyLicenseCode(code, machineId) {
   try {
     // 格式：ADU-FISH-{指纹前6位}-{到期日YYMMDD}-{产品等级}-{Ed25519签名B64}
     const parts = code.split('-')
@@ -109,7 +102,7 @@ export function verifyLicenseCode(code: string, machineId: string): { valid: boo
 const LICENSE_FILE = 'license.json'
 
 /** 读取本地授权状态 */
-export function loadLicense(dataDir: string): LicenseInfo {
+export function loadLicense(dataDir) {
   const mid = machineFingerprint()
   try {
     const raw = fs.readFileSync(path.join(dataDir, LICENSE_FILE), 'utf8')
@@ -133,7 +126,7 @@ export function loadLicense(dataDir: string): LicenseInfo {
 }
 
 /** 激活授权（验签 + 写 license.json） */
-export function activateLicense(dataDir: string, code: string): { ok: boolean; error?: string; license?: LicenseInfo } {
+export function activateLicense(dataDir, code) {
   const mid = machineFingerprint()
   const result = verifyLicenseCode(code, mid)
 
@@ -141,7 +134,7 @@ export function activateLicense(dataDir: string, code: string): { ok: boolean; e
     return { ok: false, error: result.error }
   }
 
-  const license: LicenseInfo = {
+  const license = {
     activated: true,
     level: result.level ?? 'pro',
     expiresAt: result.expiresAt ?? null,
@@ -150,8 +143,8 @@ export function activateLicense(dataDir: string, code: string): { ok: boolean; e
   }
 
   const now = Date.now()
-  const exp = new Date(license.expiresAt!).getTime()
-  license.daysLeft = Math.ceil((exp - now) / (24 * 3600 * 1000))
+  const exp = license.expiresAt ? new Date(license.expiresAt).getTime() : null
+  license.daysLeft = exp ? Math.ceil((exp - now) / (24 * 3600 * 1000)) : null
 
   try {
     fs.mkdirSync(dataDir, { recursive: true })

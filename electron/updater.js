@@ -67,7 +67,7 @@ export function initAutoUpdater() {
 }
 
 /** 手动检查更新（设置页按钮触发） */
-export async function checkForUpdates(): Promise<{ version?: string; checkedAt: string }> {
+export async function checkForUpdates() {
   try {
     const result = await autoUpdater.checkForUpdates()
     return {
@@ -80,7 +80,7 @@ export async function checkForUpdates(): Promise<{ version?: string; checkedAt: 
 }
 
 /** 下载并安装更新 */
-export async function downloadAndInstall(): Promise<void> {
+export async function downloadAndInstall() {
   try {
     await autoUpdater.downloadUpdate()
   } catch (e) {

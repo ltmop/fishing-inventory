@@ -5,7 +5,7 @@
 import crypto from 'node:crypto'
 
 /** 生成 256-bit AES 密钥，base64url 编码 */
-export function generateKey(): string {
+export function generateKey() {
   return crypto.randomBytes(32).toString('base64url')
 }
 
