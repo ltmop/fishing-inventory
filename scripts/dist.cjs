@@ -15,7 +15,28 @@ process.env.PATH = `${windir}\\System32;${windir}\\System32\\WindowsPowerShell\\
 
 const tmpOut = path.join(os.tmpdir(), 'fi-release')
 
+/** 打包前哨兵：主进程所有 .js/.cjs 必须过 node --check（tsc/vitest 都覆盖不到 electron/） */
+function syntaxCheckMainProcess() {
+  const dir = path.resolve('electron')
+  const files = []
+  for (const f of fs.readdirSync(dir)) {
+    if (/\.(js|cjs)$/.test(f)) files.push(path.join(dir, f))
+  }
+  for (const f of fs.readdirSync(path.join(dir, 'lib')).map((f) => path.join(dir, 'lib', f))) {
+    if (/\.(js|cjs)$/.test(f)) files.push(f)
+  }
+  for (const f of files) {
+    try {
+      execSync(`node --check "${f}"`, { stdio: 'pipe' })
+    } catch (e) {
+      throw new Error(`主进程语法检查失败: ${f}\n${e.stderr?.toString() ?? e.message}`)
+    }
+  }
+  console.log(`✓ 主进程 ${files.length} 个文件语法检查通过`)
+}
+
 ;(async () => {
+  syntaxCheckMainProcess()
   execSync('npm.cmd run build', { stdio: 'inherit' })
 
   await build({
