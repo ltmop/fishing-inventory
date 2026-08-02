@@ -994,6 +994,17 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
       }
     },
     'report:lowStock': (d) => cmds.lowStockProducts(d),
+    'report:hotSellers': (d, p) => {
+      const days = Math.min(Math.max(parseInt(p?.days, 10) || 30, 1), 90)
+      return d.prepare(
+        `SELECT p.id, p.brand, p.model, p.sku_code, p.suggest_price, p.photo_path, p.updated_at,
+                SUM(t.quantity) AS qty,
+                SUM(t.selling_price * t.quantity) AS revenue
+         FROM transactions t JOIN products p ON p.id = t.product_id
+         WHERE t.type = 'out' AND date(t.timestamp,'localtime') >= date('now','localtime',?)
+         GROUP BY t.product_id ORDER BY qty DESC LIMIT 9`
+      ).all(`-${days} days`)
+    },
     'supplier:list': (d) => {
       const rows = d.prepare(
         `SELECT s.id, s.name, s.phone,

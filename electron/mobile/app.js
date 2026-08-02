@@ -1,18 +1,13 @@
-// app.js: 手机端框架 —— 路由 / fetch / token / 组件
-// 铁律：零外部依赖；所有写操作走 /api/invoke；AI 挂了不挡手填
+// app.js: 手机端框架 —— 路由 / fetch / token / 组件 / 印章动画 / toast
+// 视觉：阿东渔具 · 纸质感 · 贴纸收款键 · 印章反馈
 
-// ========== Token & API ==========
-const TOKEN = (function () {
-  const p = new URLSearchParams(location.search)
-  return p.get('token') || ''
-})()
-
+const TOKEN = (() => { const p = new URLSearchParams(location.search); return p.get('token') || '' })()
 const SERVER = ''
+const COLORS = ["#0e9f6e","#b7791f","#1677ff","#7c3aed","#d64545","#0e7490","#be185d","#3f6212","#9a3412"]
 
 async function api(channel, payload) {
   const r = await fetch(SERVER + '/api/invoke?token=' + TOKEN, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel, payload: payload || {} }),
   })
   const data = await r.json()
@@ -20,148 +15,104 @@ async function api(channel, payload) {
   return data.result
 }
 
-// ========== 路由 ==========
 let currentPage = ''
-
-function navigate(hash) {
-  location.hash = hash
-}
-
+function navigate(hash) { location.hash = hash }
 window.addEventListener('hashchange', renderPage)
-document.addEventListener('DOMContentLoaded', renderPage)
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('dateEl').textContent = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })
+  renderPage()
+})
 
 function renderPage() {
   const hash = (location.hash || '#pos').replace('#', '')
   const page = hash || 'pos'
   if (page === currentPage) return
   currentPage = page
-  // 更新底部导航
-  document.querySelectorAll('.nav a').forEach(a => {
-    a.classList.toggle('active', a.getAttribute('href') === '#' + page)
+  document.querySelectorAll('.tab').forEach(a => {
+    a.classList.toggle('on', a.getAttribute('href') === '#' + page)
   })
-  // 渲染页面
   const app = document.getElementById('app')
-  app.innerHTML = '<div style="text-align:center;padding:40px;color:#999">加载中...</div>'
+  app.innerHTML = '<div class="text-center" style="padding:40px;color:var(--sub)">加载中...</div>'
   const fn = pages[page]
-  if (fn) {
-    try { fn(app) } catch (e) { app.innerHTML = errPage(page + ' 页面加载出错', e.message) }
-  } else {
-    app.innerHTML = errPage('页面未找到', '没有这个功能')
-  }
+  if (fn) { try { fn(app) } catch (e) { app.innerHTML = '<div class="text-center" style="padding:40px"><div style="font-size:48px">⚠️</div><div class="text-red font-bold mt">' + page + ' 出错</div><div class="text-sm text-muted mt-sm">' + e.message + '</div></div>' } }
+  else { app.innerHTML = '<div class="text-center" style="padding:40px"><div style="font-size:48px">⚠️</div><div class="font-bold mt">页面未找到</div></div>' }
+}
+
+// ========== 印章动画 ==========
+function showStamp(text, detail, isGreen) {
+  const el = document.getElementById('doneStamp'), sa = document.getElementById('stampA'), sb = document.getElementById('stampB'), se = document.getElementById('stampEl')
+  sa.textContent = text
+  sb.textContent = detail || ''
+  se.classList.toggle('green', !!isGreen)
+  el.classList.add('show')
+  setTimeout(() => el.classList.remove('show'), 1300)
+}
+
+// ========== Toast ==========
+let tt
+function toast(msg) {
+  const el = document.getElementById('toastEl')
+  el.textContent = msg; el.classList.add('show')
+  clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 1500)
 }
 
 // ========== 工具 ==========
-function el(tag, attrs, ...children) {
-  const e = document.createElement(tag)
-  if (attrs) Object.entries(attrs).forEach(([k, v]) => {
-    if (k === 'className') e.className = v
-    else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v)
-    else e.setAttribute(k, v)
-  })
-  children.forEach(c => {
-    if (typeof c === 'string') e.appendChild(document.createTextNode(c))
-    else if (c instanceof Node) e.appendChild(c)
-    else if (Array.isArray(c)) c.forEach(cc => e.appendChild(typeof cc === 'string' ? document.createTextNode(cc) : cc))
-  })
-  return e
-}
-
-function $(sel) { return document.querySelector(sel) }
-function $$(sel) { return document.querySelectorAll(sel) }
-
 function fmt(cents, nullText) {
   if (cents === null || cents === undefined) return nullText || '-'
-  return '¥' + (cents / 100).toFixed(2)
+  const v = cents / 100
+  return '¥' + (v % 1 ? v.toFixed(2) : v.toFixed(0))
 }
 
-function errPage(title, detail) {
-  return '<div class="err-page"><div class="icon">⚠️</div><div style="font-size:16px;font-weight:600;color:#ff4d4f">' + title + '</div><div class="text-sm text-muted mt">' + (detail || '') + '</div><div class="text-xs text-muted mt">请在电脑上操作此功能</div></div>'
-}
+function phColor(p) { return COLORS[(p.id || 0) % COLORS.length] }
+function phChar(p) { const name = (p.brand || '') + (p.model || '') || p.sku_code || ''; return name[0] || '?' }
+function prodName(p) { return (p.brand || '') + ' ' + (p.model || '') || p.sku_code || '未知' }
 
-// ========== 扫码模块 ==========
+// ========== 扫码 ==========
 let scanCallback = null
 
-function openScanner(callback, hint) {
-  scanCallback = callback
-  const overlay = document.getElementById('scan-overlay')
-  if (!overlay) {
-    // 动态创建扫码遮罩
-    const div = document.createElement('div')
-    div.id = 'scan-overlay'
-    div.innerHTML = '<button class="scan-close" id="scan-close-btn">✕</button><video id="scan-video" autoplay playsinline></video><div class="scan-input"><input type="text" id="scan-manual" placeholder="或手动输入条码"><button id="scan-manual-btn">确认</button></div>'
-    document.body.appendChild(div)
-    document.getElementById('scan-close-btn').onclick = closeScanner
-    document.getElementById('scan-manual-btn').onclick = () => {
-      const v = document.getElementById('scan-manual').value.trim()
-      if (v && scanCallback) { closeScanner(); scanCallback(v); }
-    }
-  }
-  document.getElementById('scan-overlay').classList.add('show')
-  document.getElementById('scan-manual').value = ''
-  startScan()
-}
-
-function closeScanner() {
-  const overlay = document.getElementById('scan-overlay')
-  if (overlay) overlay.classList.remove('show')
-  stopScan()
-}
-
-function startScan() {
-  const video = document.getElementById('scan-video')
-  if (!video) return
-  // BarcodeDetector API (Chrome/Android)
+function openScanner(cb, hint) {
+  scanCallback = cb
   if ('BarcodeDetector' in window) {
     const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code'] })
     navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(stream => {
-      video.srcObject = stream
-      video.play()
-      pollBarcode(detector, video, stream)
-    }).catch(() => { scanFallback('摄像头不可用，请手动输入') })
+      const overlay = document.createElement('div')
+      overlay.id = 'scanner-overlay'
+      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:#000;z-index:200;display:flex;flex-direction:column'
+      overlay.innerHTML = '<button style="position:absolute;top:16px;right:16px;width:40px;height:40px;border-radius:20px;background:rgba(255,255,255,.2);color:#fff;border:none;font-size:20px;cursor:pointer;z-index:10">✕</button><video autoplay playsinline style="flex:1;object-fit:cover"></video><div style="position:absolute;bottom:80px;left:16px;right:16px;display:flex;gap:8px"><input id="scan-manual" placeholder="或手动输入条码" style="flex:1;padding:12px;border-radius:10px;border:none;font-size:16px"><button id="scan-manual-btn" style="padding:12px 18px;border-radius:10px;border:none;background:var(--blue);color:#fff;font-size:14px;cursor:pointer">确认</button></div>'
+      document.body.appendChild(overlay)
+      overlay.querySelector('button').onclick = () => { closeScanner(); stopStream(stream) }
+      document.getElementById('scan-manual-btn').onclick = () => { const v = document.getElementById('scan-manual').value.trim(); if (v && scanCallback) { closeScanner(); stopStream(stream); scanCallback(v) } }
+      overlay.querySelector('video').srcObject = stream
+      overlay.querySelector('video').play()
+      poll(detector, overlay.querySelector('video'), stream)
+    }).catch(() => { const v = prompt('摄像头不可用，请手动输入条码'); if (v && scanCallback) scanCallback(v) })
   } else {
-    scanFallback('此浏览器不支持扫码，请手动输入')
+    const v = prompt('此浏览器不支持扫码，请手动输入条码'); if (v && scanCallback) scanCallback(v)
   }
 }
 
-let scanPollTimer = null
-function pollBarcode(detector, video, stream) {
-  if (!document.getElementById('scan-overlay').classList.contains('show')) { stopStream(stream); return }
+let pollTimer
+function poll(detector, video, stream) {
+  if (!document.getElementById('scanner-overlay')) { stopStream(stream); return }
   detector.detect(video).then(barcodes => {
     if (barcodes.length > 0 && scanCallback) {
-      stopStream(stream)
-      closeScanner()
-      scanCallback(barcodes[0].rawValue)
-      return
+      stopStream(stream); closeScanner(); scanCallback(barcodes[0].rawValue); return
     }
-    scanPollTimer = setTimeout(() => pollBarcode(detector, video, stream), 200)
-  }).catch(() => {
-    scanPollTimer = setTimeout(() => pollBarcode(detector, video, stream), 500)
-  })
+    pollTimer = setTimeout(() => poll(detector, video, stream), 200)
+  }).catch(() => { pollTimer = setTimeout(() => poll(detector, video, stream), 500) })
 }
 
-function stopScan() {
-  if (scanPollTimer) { clearTimeout(scanPollTimer); scanPollTimer = null }
-  const video = document.getElementById('scan-video')
-  if (video && video.srcObject) stopStream(video.srcObject)
+function closeScanner() {
+  const el = document.getElementById('scanner-overlay'); if (el) { el.remove(); scanCallback = null }
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
 }
 
-function stopStream(stream) {
-  stream.getTracks().forEach(t => t.stop())
-}
-
-function scanFallback(msg) {
-  const manual = document.getElementById('scan-manual')
-  if (manual) manual.placeholder = msg
-}
+function stopStream(stream) { stream.getTracks().forEach(t => t.stop()) }
 
 // ========== 页面注册 ==========
 const pages = {}
+function page(name, fn) { pages[name] = fn }
 
-function page(name, renderFn) {
-  pages[name] = renderFn
-}
-
-// ========== 更多页 ==========
 page('more', (app) => {
   app.innerHTML = ''
   const items = [
@@ -170,15 +121,16 @@ page('more', (app) => {
     ['🏭 供应商', '进货对账', () => navigate('suppliers')],
     ['📋 核对货架', '每天核对一片区域', () => navigate('stocktake')],
   ]
-  items.map(([title, desc, onclick]) => {
-    const card = el('div', { className: 'card', onclick }, [
-      el('div', { className: 'font-bold text-lg' }, title),
-      el('div', { className: 'text-sm text-muted mt-sm' }, desc),
-    ])
+  items.forEach(([t, d, fn]) => {
+    const card = document.createElement('div')
+    card.className = 'card'; card.style.cursor = 'pointer'; card.onclick = fn
+    card.innerHTML = '<div class="font-bold">' + t + '</div><div class="text-sm text-muted mt-sm">' + d + '</div>'
     app.appendChild(card)
   })
-  app.appendChild(el('div', { className: 'text-center text-xs text-muted mt', style: 'padding:20px' }, '更多功能请在电脑上操作'))
+  const note = document.createElement('div')
+  note.className = 'text-center text-sm text-muted'; note.style.padding = '20px'
+  note.textContent = '更多功能请在电脑上操作'
+  app.appendChild(note)
 })
 
-// ========== 启动 ==========
 renderPage()

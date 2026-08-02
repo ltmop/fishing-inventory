@@ -1,30 +1,20 @@
-// suppliers.js: 供应商列表（轻量，看应付总额）
+// suppliers.js: 供应商
 page('suppliers', function (app) {
   let list = []
-
-  async function load() {
-    try { list = await api('supplier:list') } catch { list = [] }
-    render()
-  }
-
+  async function load() { try { list = await api('supplier:list') } catch { list = [] }; render() }
   function render() {
-    app.innerHTML = ''
-    app.appendChild(el('div', { className: 'text-lg font-bold mb' }, '🏭 供应商'))
-    if (list.length === 0) {
-      app.innerHTML += '<div class="card text-center text-muted" style="padding:30px">暂无供应商</div>'
-      load()
-      return
-    }
+    app.innerHTML = '<div class="sectitle"><span class="tag">🏭 供应商</span></div>'
+    if (!list.length) { const e = document.createElement('div'); e.className = 'text-center text-muted'; e.style.padding = '30px'; e.textContent = '暂无供应商'; app.appendChild(e); load(); return }
     list.forEach(s => {
-      app.appendChild(el('div', { className: 'card' }, [
-        el('div', { className: 'flex justify-between items-center' }, [
-          el('div', {}, [el('div', { className: 'font-bold text-sm' }, s.name), s.phone ? el('div', { className: 'text-xs text-muted' }, s.phone) : null]),
-          el('div', { className: 'text-right text-sm text-muted' }, '货款 ' + fmt(s.total_cost)),
-        ]),
-      ]))
+      const card = document.createElement('div'); card.className = 'card'
+      card.innerHTML =
+        '<div class="split">' +
+          '<div><div class="font-bold">' + s.name + '</div>' + (s.phone ? '<div class="text-xs text-muted mt-sm">' + s.phone + '</div>' : '') + '</div>' +
+          '<div class="text-right text-sm text-muted">货款 ' + fmt(s.total_cost) + '</div>' +
+        '</div>'
+      app.appendChild(card)
     })
-    app.appendChild(el('div', { className: 'text-center text-xs text-muted mt', style: 'padding:12px' }, '详细对账请在电脑上操作'))
+    app.appendChild(Object.assign(document.createElement('div'), { className: 'text-center text-xs text-muted', style: 'padding:12px', textContent: '详细对账请在电脑上操作' }))
   }
-
   load()
 })
