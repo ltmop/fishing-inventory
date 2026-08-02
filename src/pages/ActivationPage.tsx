@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle, Copy, Loader2, Key } from 'lucide-react'
-import { backend } from '@/lib/api'
 import { useLicense } from '@/lib/license'
 import { daysText } from '@/lib/license'
 import { Button } from '@/components/ui/button'

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, CheckCircle, ScanBarcode, PackageMinus, Upload } from 'lucide-react'
+import { ArrowRight, CheckCircle, PackageMinus, Upload } from 'lucide-react'
 import { backend } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
