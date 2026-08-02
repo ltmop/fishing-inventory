@@ -15,12 +15,29 @@ function Table({ className, ...props }: React.ComponentProps<'table'>) {
 }
 
 function TableHeader({ className, ...props }: React.ComponentProps<'thead'>) {
-  return <thead data-slot="table-header" className={cn('[&_tr]:border-b', className)} {...props} />
+  return (
+    <thead
+      data-slot="table-header"
+      className={cn(
+        'sticky top-0 z-10 bg-background backdrop-blur [&_tr]:border-b [&_tr]:shadow-[0_1px_0_0] [&_tr]:shadow-border/60 dark:bg-[#17263c]',
+        className,
+      )}
+      {...props}
+    />
+  )
 }
 
 function TableBody({ className, ...props }: React.ComponentProps<'tbody'>) {
   return (
-    <tbody data-slot="table-body" className={cn('[&_tr:last-child]:border-0', className)} {...props} />
+    <tbody
+      data-slot="table-body"
+      className={cn(
+        // 斑马纹：偶数行浅水色，渔具店账本翻页感
+        '[&_tr:nth-child(even)]:bg-lake-50/40 dark:[&_tr:nth-child(even)]:bg-white/[0.02] [&_tr:last-child]:border-0',
+        className,
+      )}
+      {...props}
+    />
   )
 }
 

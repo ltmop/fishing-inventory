@@ -30,9 +30,9 @@ export function Layout() {
         {/* 路由切换时整页淡入上移，key 变化触发重挂载 */}
         <motion.div
           key={location.pathname}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 10, scale: 0.995 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
         >
           <Outlet />
         </motion.div>

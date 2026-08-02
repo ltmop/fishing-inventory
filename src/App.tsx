@@ -58,6 +58,7 @@ function App() {
   const loadAll = useAppStore((s) => s.loadAll)
   const loaded = useAppStore((s) => s.loaded)
   const fontSizeMode = useAppStore((s) => s.fontSizeMode)
+  const darkMode = useAppStore((s) => s.darkMode)
   // 启动动画：数据就绪后播一次，播完才挂载路由（每次启动只播一次；点击或减弱动画直接跳过）
   const [splashDone, setSplashDone] = useState(false)
 
@@ -65,6 +66,11 @@ function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('text-large', fontSizeMode === 'large')
   }, [fontSizeMode])
+
+  // 暗色模式：给 <html> 挂 .dark class，深蓝黑底（打烊模式）
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode)
+  }, [darkMode])
 
   // Electron 环境启动时从 SQLite 拉全量数据；浏览器 dev 无后端则注入 mock（只跑一次，避免闪烁）
   useEffect(() => {

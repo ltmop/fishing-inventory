@@ -110,6 +110,7 @@ export type ExchangeResult =
 // 读写都包 try/catch，隐私模式/异常环境下退回默认值而不是炸掉
 const LS_SOUND = 'fi-sound'
 const LS_FONT_SIZE = 'fi-font-size'
+const LS_DARK = 'fi-dark-mode'
 
 function readStorage(key: string): string | null {
   try {
@@ -134,8 +135,11 @@ interface AppState {
   soundEnabled: boolean
   /** 大字模式：根字号从默认提到 18px，全局 rem 生效 */
   fontSizeMode: FontSizeMode
+  /** 暗色模式（打烊模式）：深蓝黑底，晚上不刺眼 */
+  darkMode: boolean
   setSoundEnabled: (on: boolean) => void
   setFontSizeMode: (mode: FontSizeMode) => void
+  setDarkMode: (on: boolean) => void
 
   products: Product[]
   batches: InventoryBatch[]
@@ -430,6 +434,7 @@ function buildMockExpense(
 export const useAppStore = create<AppState>((set, get) => ({
   soundEnabled: readStorage(LS_SOUND) !== 'off',
   fontSizeMode: readStorage(LS_FONT_SIZE) === 'large' ? 'large' : 'normal',
+  darkMode: readStorage(LS_DARK) === 'on',
   setSoundEnabled: (on) => {
     writeStorage(LS_SOUND, on ? 'on' : 'off')
     set({ soundEnabled: on })
@@ -437,6 +442,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setFontSizeMode: (mode) => {
     writeStorage(LS_FONT_SIZE, mode)
     set({ fontSizeMode: mode })
+  },
+  setDarkMode: (on) => {
+    writeStorage(LS_DARK, on ? 'on' : 'off')
+    set({ darkMode: on })
   },
 
   // 初始为空：Electron 由 loadAll 填充，浏览器 dev 由 App.tsx 注入 mock（避免先闪 mock 再跳真数据）

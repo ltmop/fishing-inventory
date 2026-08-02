@@ -36,9 +36,10 @@ import { StatCard, type CardSpec } from './dashboard/StatCard'
 import { TodaySalesCard } from './dashboard/TodaySalesCard'
 import { AdviceCard } from './dashboard/AdviceCard'
 import { computeRestockAdvice } from '@/lib/restockAdvice'
+import { EmptyState } from '@/components/EmptyState'
 
-// 图表统一品牌深蓝系：主色 brand-600 起，同色系深浅递进，末尾两格留灰给"其他"
-const PIE_COLORS = ['#1d4ed8', '#2563eb', '#3b82f6', '#60a5fa', '#0ea5e9', '#38bdf8', '#1e40af', '#818cf8', '#94a3b8']
+// 海洋系配色：深海蓝→湖蓝→湖水青→水草绿→沙滩金，像海面由深到浅的层次
+const PIE_COLORS = ['#1d4ed8', '#0ea5e9', '#10b981', '#34d399', '#38bdf8', '#f59e0b', '#0d9488', '#818cf8', '#94a3b8']
 const LOW_STOCK_THRESHOLD = 5
 const SLOW_DAYS = 90
 
@@ -328,7 +329,7 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent>
             {categoryData.length === 0 ? (
-              <div className="py-16 text-center text-sm text-muted-foreground">暂无库存数据</div>
+              <EmptyState compact title="还没有库存" desc="入几件货，这里就能看到各品类的占比了" />
             ) : (
               <ResponsiveContainer width="100%" height={280}>
                 <PieChart>
@@ -364,7 +365,7 @@ export function DashboardPage() {
                 <Tooltip cursor={{ fill: 'rgba(37, 99, 235, 0.06)' }} />
                 <Legend />
                 <Bar dataKey="入库" fill="#1d4ed8" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="出库" fill="#7aa5f8" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="出库" fill="#10b981" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </CardContent>

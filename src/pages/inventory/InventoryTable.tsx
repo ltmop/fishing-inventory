@@ -21,6 +21,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { formatDate, formatPrice } from '@/lib/formatters'
+import { EmptyState } from '@/components/EmptyState'
 import { productPhotoUrl } from '@/lib/photo'
 import { formatSpecs } from '@/lib/productSpecs'
 import { usePagination } from '@/lib/usePagination'
@@ -136,11 +137,13 @@ export function InventoryTable({
     <Card>
       <CardContent className="pt-6">
         {products.length === 0 ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            {allEmpty
-              ? '还没有商品，点左边菜单的「扫码入库」，扫一下商品条码就能录入第一件货'
-              : '没有符合条件的商品，换个关键词或筛选条件试试'}
-          </div>
+          <EmptyState
+            compact
+            title={allEmpty ? '还没有商品' : '没有符合条件的商品'}
+            desc={allEmpty
+              ? '点左边「扫码入库」，扫一下条码就能录入第一件货'
+              : '换个关键词或筛选条件试试'}
+          />
         ) : (
           <>
             <Table>

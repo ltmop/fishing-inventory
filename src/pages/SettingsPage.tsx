@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import QRCode from 'qrcode'
-import { FolderOpen, Info, Key, Volume2, Type, AudioLines, Mic } from 'lucide-react'
+import { FolderOpen, Info, Key, Moon, Volume2, Type, AudioLines, Mic } from 'lucide-react'
 import { PageHeader } from '@/components/feedback'
 import { backend } from '@/lib/api'
 import { APP_VERSION } from '@/lib/version'
@@ -47,6 +47,8 @@ export function SettingsPage() {
   const setSoundEnabled = useAppStore((s) => s.setSoundEnabled)
   const fontSizeMode = useAppStore((s) => s.fontSizeMode)
   const setFontSizeMode = useAppStore((s) => s.setFontSizeMode)
+  const darkMode = useAppStore((s) => s.darkMode)
+  const setDarkMode = useAppStore((s) => s.setDarkMode)
   // 语音播报开关：与 AiPanel 头部喇叭按钮共享同一份 localStorage（'fi-tts'）
   const [ttsOn, setTtsOn] = useState(readTtsEnabled)
   const toggleTts = () => {
@@ -342,6 +344,13 @@ export function SettingsPage() {
             description="AI 助手的答复自动读出来，忙着手头活不用盯着屏幕看；仪表盘 AI 面板上的喇叭按钮控制的是同一个开关"
             checked={ttsOn}
             onToggle={toggleTts}
+          />
+          <PreferenceRow
+            icon={<Moon className="size-4 text-slate-500" />}
+            title="深色模式（打烊了也不刺眼）"
+            description="界面换成深蓝黑底，晚上守店、关店结账时眼睛舒服些"
+            checked={darkMode}
+            onToggle={() => setDarkMode(!darkMode)}
           />
         </CardContent>
       </Card>
