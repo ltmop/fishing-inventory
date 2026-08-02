@@ -72,7 +72,7 @@ function NavItem({
           'flex items-center gap-3 rounded-md text-sm font-medium transition-all duration-150',
           collapsed ? 'justify-center px-0 py-2.5' : large ? 'px-3 py-2.5' : 'px-3 py-2',
           isActive
-            ? 'bg-white/15 text-white shadow-[inset_3px_0_0_0] shadow-sky-400'
+            ? 'bg-gold-500/15 text-gold-200 shadow-[inset_3px_0_0_0] shadow-gold-500'
             : 'text-white/70 hover:bg-white/10 hover:text-white',
         )
       }
@@ -102,13 +102,13 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       )}
     >
       <div className={cn('flex items-center gap-2.5 px-4 py-5', collapsed && 'justify-center px-0')}>
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-lake-500 shadow-lg shadow-brand-900/40 ring-1 ring-white/20">
-          <Fish className="size-5 text-white" />
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-gold-400 to-gold-600 shadow-lg shadow-gold-900/50 ring-1 ring-gold-200/40">
+          <Fish className="size-5 text-[#0a1628]" />
         </div>
         {!collapsed && (
           <div className="leading-tight">
             <div className="text-sm font-bold text-white">渔具库存</div>
-            <div className="text-xs text-white/60">AI 智能进销存</div>
+            <div className="text-xs text-gold-200/70">AI 智能进销存</div>
           </div>
         )}
       </div>

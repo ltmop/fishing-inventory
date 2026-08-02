@@ -434,7 +434,8 @@ function buildMockExpense(
 export const useAppStore = create<AppState>((set, get) => ({
   soundEnabled: readStorage(LS_SOUND) !== 'off',
   fontSizeMode: readStorage(LS_FONT_SIZE) === 'large' ? 'large' : 'normal',
-  darkMode: readStorage(LS_DARK) === 'on',
+  // 默认深色（高端渔具品牌风）；只有显式存过 off 才回浅色
+  darkMode: readStorage(LS_DARK) === null ? true : readStorage(LS_DARK) === 'on',
   setSoundEnabled: (on) => {
     writeStorage(LS_SOUND, on ? 'on' : 'off')
     set({ soundEnabled: on })

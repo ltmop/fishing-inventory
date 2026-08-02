@@ -76,6 +76,12 @@
   --color-reef-500: #64748b;
   --color-reef-700: #334155;
   --color-reef-900: #1e293b;
+  /* 古铜金（高端渔具品牌点缀）：强调/激活/重点数字 */
+  --color-gold-100: #f5ead0;
+  --color-gold-200: #e8d5a4;
+  --color-gold-400: #d4af37;
+  --color-gold-500: #c9a55a;
+  --color-gold-600: #a9862f;
 
   /* 三级阴影纵深系统：投影承担前后景分层，不靠描边 */
   /* L1 默认卡：柔和大半径，让卡片浮出 #e8eef6 蓝灰底 */
@@ -92,26 +98,76 @@
     0 12px 32px -8px rgb(37 99 235 / 0.28);
 }
 
-/* 暗色模式（打烊模式）：深蓝黑底，卡片深蓝灰；html 挂 .dark 类启用 */
+/* 暗色模式（默认·高端渔具品牌风）：深海黑蓝底 + 卡片深蓝灰 + 古铜金点缀。
+   像走进达亿瓦/禧玛诺旗舰店：深海、金属、贵金属光泽。 */
 :root.dark {
-  --background: #0f1b2d;
-  --foreground: #e2e8f0;
-  --card: #17263c;
-  --card-foreground: #e2e8f0;
-  --popover: #17263c;
-  --popover-foreground: #e2e8f0;
-  --primary: #38bdf8;
-  --primary-foreground: #0f172a;
-  --secondary: #1e293b;
-  --secondary-foreground: #e2e8f0;
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
-  --accent: #1e293b;
-  --accent-foreground: #e2e8f0;
-  --border: #334155;
-  --input: #334155;
-  --ring: #38bdf8;
+  --background: #0a1628;
+  --foreground: #e6edf5;
+  --card: #122038;
+  --card-foreground: #e6edf5;
+  --popover: #122038;
+  --popover-foreground: #e6edf5;
+  --primary: #c9a55a;
+  --primary-foreground: #0a1628;
+  --secondary: #1a2c48;
+  --secondary-foreground: #d8e2ee;
+  --muted: #16283f;
+  --muted-foreground: #8fa3c0;
+  --accent: #1a2c48;
+  --accent-foreground: #e6edf5;
+  --destructive: #e05252;
+  --border: #243755;
+  --input: #243755;
+  --ring: #c9a55a;
 }
+
+/* 浅色模式（可选）：挂 html.light 类时用清爽浅色，适合白天强光环境 */
+:root.light {
+  --background: #f2f6f9;
+  --foreground: #1c2b3a;
+  --card: #ffffff;
+  --card-foreground: #1c2b3a;
+  --popover: #ffffff;
+  --popover-foreground: #1c2b3a;
+  --primary: #1d4ed8;
+  --primary-foreground: #ffffff;
+  --secondary: #e8eef5;
+  --secondary-foreground: #1c2b3a;
+  --muted: #e8eef5;
+  --muted-foreground: #64748b;
+  --accent: #e8eef5;
+  --accent-foreground: #1c2b3a;
+  --border: #d7e0ea;
+  --input: #d7e0ea;
+  --ring: #1d4ed8;
+}
+
+/* ===== 深色全局覆盖层：让散落在页面里的硬编码浅色类，在 .dark 下自动变暗。
+   覆盖 35 个文件里几百处 bg-white/slate-* / text-slate-* / border-slate-*，
+   省去逐个加 dark: 变体的体力活，让整个界面在深色高端风下立即统一。===== */
+:root.dark .bg-white { background-color: #122038; }
+:root.dark .bg-slate-50 { background-color: #15263c; }
+:root.dark .bg-slate-100 { background-color: #1a2c48; }
+:root.dark .bg-slate-200 { background-color: #243755; }
+:root.dark .bg-slate-300 { background-color: #2d4263; }
+:root.dark .bg-gray-50 { background-color: #15263c; }
+:root.dark .bg-gray-100 { background-color: #1a2c48; }
+:root.dark .text-slate-400 { color: #8fa3c0; }
+:root.dark .text-slate-500 { color: #93a7c4; }
+:root.dark .text-slate-600 { color: #a9bad0; }
+:root.dark .text-slate-700 { color: #c3d1e2; }
+:root.dark .text-slate-800 { color: #dbe4ef; }
+:root.dark .text-slate-900 { color: #e6edf5; }
+:root.dark .text-gray-400 { color: #8fa3c0; }
+:root.dark .text-gray-500 { color: #93a7c4; }
+:root.dark .text-gray-600 { color: #a9bad0; }
+:root.dark .text-gray-700 { color: #c3d1e2; }
+:root.dark .border-slate-100 { border-color: #1e3049; }
+:root.dark .border-slate-200 { border-color: #243755; }
+:root.dark .border-slate-300 { border-color: #2d4263; }
+:root.dark .border-gray-100 { border-color: #1e3049; }
+:root.dark .border-gray-200 { border-color: #243755; }
+:root.dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) { border-color: #243755; }
 
 /* 印章徽章：渔具店"盖章"感的反馈。红圆章=预警，绿方章=正常 */
 @utility seal-red {

@@ -67,9 +67,11 @@ function App() {
     document.documentElement.classList.toggle('text-large', fontSizeMode === 'large')
   }, [fontSizeMode])
 
-  // 暗色模式：给 <html> 挂 .dark class，深蓝黑底（打烊模式）
+  // 明暗模式：默认深色（高端渔具品牌风）；关掉挂 .light 回浅色
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', darkMode)
+    const el = document.documentElement
+    el.classList.toggle('dark', darkMode)
+    el.classList.toggle('light', !darkMode)
   }, [darkMode])
 
   // Electron 环境启动时从 SQLite 拉全量数据；浏览器 dev 无后端则注入 mock（只跑一次，避免闪烁）

@@ -58,7 +58,7 @@ export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
             <Icon className={spec.featured ? 'size-7' : 'size-5'} />
           </div>
           <div>
-            <div className={`text-xs ${spec.featured ? 'text-white/70' : 'text-slate-500'}`}>{spec.title}</div>
+            <div className={`text-xs ${spec.featured ? 'text-white/70 dark:text-[#0a1628]/80' : 'text-slate-500'}`}>{spec.title}</div>
             <div
               className={`font-bold leading-tight tabular-nums ${spec.numClass} ${
                 spec.featured ? 'text-[36px]' : 'text-[28px]'
@@ -66,10 +66,10 @@ export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
             >
               {spec.format(animated)}
             </div>
-            <div className={`text-xs ${spec.featured ? 'text-white/60' : 'text-slate-400'}`}>
+            <div className={`text-xs ${spec.featured ? 'text-white/60 dark:text-[#0a1628]/70' : 'text-slate-400'}`}>
               {spec.unit}
               {spec.actionHint && (
-                <span className={spec.featured ? 'ml-1 text-white/80' : 'ml-1 text-brand-500'}>
+                <span className={spec.featured ? 'ml-1 text-white/80 dark:text-[#0a1628]' : 'ml-1 text-brand-500 dark:text-gold-400'}>
                   {spec.actionHint} →
                 </span>
               )}
