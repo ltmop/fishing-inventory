@@ -72,7 +72,7 @@ export function InboundPage() {
   const [costYuan, setCostYuan] = useState('')
   const [location, setLocation] = useState('')
   const [supplierId, setSupplierId] = useState(NO_SUPPLIER)
-  const [operator, setOperator] = useState('阿杜')
+  const [operator, setOperator] = useState('阿东')
 
   // 新建商品 Dialog（元字符串表单；安全库存空串=不单独设，按默认 5 预警）
   const [dialogOpen, setDialogOpen] = useState(false)

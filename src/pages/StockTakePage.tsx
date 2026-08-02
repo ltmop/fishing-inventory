@@ -45,7 +45,7 @@ export function StockTakePage() {
   const [area, setArea] = useState(WHOLE_SHOP)
   const [category, setCategory] = useState(WHOLE_SHOP)
   const [supplierKey, setSupplierKey] = useState(WHOLE_SHOP)
-  const [operator, setOperator] = useState('阿杜')
+  const [operator, setOperator] = useState('阿东')
 
   // 完成盘点确认 Dialog
   const [finishOpen, setFinishOpen] = useState(false)

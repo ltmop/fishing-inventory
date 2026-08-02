@@ -137,7 +137,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       </nav>
 
       {!collapsed && (
-        <div className="px-4 pb-1 text-[11px] text-white/40">v{APP_VERSION} · 阿杜 © 2026</div>
+        <div className="px-4 pb-1 text-[11px] text-white/40">v{APP_VERSION} · 阿东 © 2026</div>
       )}
       <button
         onClick={onToggle}

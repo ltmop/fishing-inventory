@@ -525,7 +525,7 @@ export function SettingsPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-slate-600">
-          <div>渔具库存 AI 管理系统 v{APP_VERSION} · 阿杜 © 2026</div>
+          <div>渔具库存 AI 管理系统 v{APP_VERSION} · 阿东 © 2026</div>
           <div className="text-xs text-muted-foreground">
             Electron + React + SQLite（WAL）· 本地单机部署 · 断电不丢数据
           </div>

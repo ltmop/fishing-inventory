@@ -53,7 +53,7 @@ export function OutboundPage() {
   const [priceYuan, setPriceYuan] = useState('')
   // 当前售价来自哪个价格档（手动改价后为 null=自定义价）
   const [activeTier, setActiveTier] = useState<PriceLevel | null>(null)
-  const [operator, setOperator] = useState('阿杜')
+  const [operator, setOperator] = useState('阿东')
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
