@@ -1,11 +1,21 @@
 // app.js: 手机端框架 —— 路由 / fetch / token / 组件 / 印章动画 / toast
 // 视觉：阿东渔具 · 纸质感 · 贴纸收款键 · 印章反馈
 
-const TOKEN = (() => { const p = new URLSearchParams(location.search); return p.get('token') || '' })()
+// token 持久化：优先从 URL 拿（扫码打开时带 token），其次从 localStorage 取（上次记住的），
+// 都没有才提示重新扫码。首次扫码打开时自动记住，之后关闭页面/加到主屏幕都能直接重开。
+const TOKEN = (() => {
+  const fromUrl = new URLSearchParams(location.search).get('token')
+  if (fromUrl) {
+    try { localStorage.setItem('fi-mobile-token', fromUrl) } catch { /* 存不住不致命 */ }
+    return fromUrl
+  }
+  try { return localStorage.getItem('fi-mobile-token') || '' } catch { return '' }
+})()
 const SERVER = ''
 const COLORS = ["#0e9f6e","#b7791f","#1677ff","#7c3aed","#d64545","#0e7490","#be185d","#3f6212","#9a3412"]
 
 async function api(channel, payload) {
+  if (!TOKEN) throw new Error('未连接电脑，请回到设置页扫码进入手机端')
   const r = await fetch(SERVER + '/api/invoke?token=' + TOKEN, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel, payload: payload || {} }),
