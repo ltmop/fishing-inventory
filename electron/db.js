@@ -233,10 +233,32 @@ CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
  * @param {string} dbPath 数据库文件绝对路径
  * @returns {DatabaseSync}
  */
+/** 依次执行全部迁移（各自独立 try/catch：单个失败记录但不连锁崩坏） */
+function runMigrations(db) {
+  const steps = [
+    ['旧商品表重建', migrateOldProductsTable],
+    ['赊账包补列', migrateCreditPack],
+    ['渔具属性补列', migrateFishingAttrs],
+    ['客户价格档补列', migrateCustomerPriceLevel],
+    ['安全库存补列', migrateMinStock],
+    ['收款方式补列', migratePayMethod],
+  ]
+  const failures = []
+  for (const [name, fn] of steps) {
+    try {
+      fn(db)
+    } catch (e) {
+      failures.push(`${name}: ${e.message}`)
+      console.error(`[db] 迁移「${name}」失败（已跳过，不阻断启动）:`, e.message)
+    }
+  }
+  return failures
+}
+
 export function openDatabase(dbPath) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
   // 迁移安全网：老库做原地重建表前先把库文件拷贝留底（已存在不覆盖），
-  // 迁移一旦失败可从 .pre-migration.bak 手动回退；拷贝失败只告警不阻断启动
+  // 迁移一旦失败可从 .pre-migration.bak 自动回退；拷贝失败只告警不阻断启动
   const bakPath = dbPath + '.pre-migration.bak'
   if (fs.existsSync(dbPath) && !fs.existsSync(bakPath)) {
     try {
@@ -245,17 +267,46 @@ export function openDatabase(dbPath) {
       console.error('[db] 迁移前留底备份失败:', e)
     }
   }
-  const db = new DatabaseSync(dbPath)
-  db.exec(SCHEMA_SQL)
-  migrateOldProductsTable(db)
-  migrateCreditPack(db)
-  migrateFishingAttrs(db)
-  migrateCustomerPriceLevel(db)
-  migrateMinStock(db)
-  migratePayMethod(db)
-  const row = db.prepare('SELECT COUNT(*) AS n FROM products').get()
-  if (row.n === 0) seedDatabase(db)
-  return db
+
+  const openAndMigrate = (path) => {
+    const db = new DatabaseSync(path)
+    db.exec(SCHEMA_SQL)
+    const failures = runMigrations(db)
+    const row = db.prepare('SELECT COUNT(*) AS n FROM products').get()
+    if (row.n === 0) seedDatabase(db)
+    return { db, failures }
+  }
+
+  // 第一次尝试
+  let result
+  try {
+    result = openAndMigrate(dbPath)
+  } catch (e) {
+    // 迁移失败 → 若 .pre-migration.bak 存在，恢复后再试一次（自动兜底，不砖死）
+    console.error('[db] 首次迁移失败，尝试从备份恢复:', e.message)
+    try { db?.close() } catch { /* 忽略 */ }
+    if (fs.existsSync(bakPath)) {
+      try {
+        // 当前（可能半迁移）的库留底，再用备份覆盖
+        const brokenPath = dbPath + '.broken-' + Date.now()
+        fs.copyFileSync(dbPath, brokenPath)
+        fs.copyFileSync(bakPath, dbPath)
+        console.error('[db] 已从备份恢复，broken 库留底于:', brokenPath)
+        result = openAndMigrate(dbPath)
+      } catch (e2) {
+        // 恢复也失败：把备份路径明确抛出，让启动弹窗可读
+        throw new Error(`数据库迁移失败且自动恢复也失败。数据在备份：${bakPath}\n原始错误：${e.message}\n恢复错误：${e2.message}`)
+      }
+    } else {
+      throw new Error(`数据库迁移失败且无备份可恢复。错误：${e.message}`)
+    }
+  }
+
+  // 记录迁移失败项（不阻断启动，但不静默）
+  if (result.failures.length > 0) {
+    console.warn('[db] 部分迁移未完成:', result.failures.join('; '))
+  }
+  return result.db
 }
 
 // ---------- 旧库迁移：10 大类 schema（无 sub_category）→ 20 大类 + sub_category ----------
