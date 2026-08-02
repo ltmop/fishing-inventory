@@ -3,9 +3,9 @@
 // 铁律：只读，不许 BEGIN/WAL checkpoint/任何写操作
 // 隐私：快照不含客户姓名电话、barcode、成本价明细
 
-import { buildRangeReport, todayKey } from '../src/lib/salesReport.js'
-import { splitTodayPayments } from '../src/lib/paySplit.js'
-import { computeRestockAdvice } from '../src/lib/restockAdvice.js'
+import { buildRangeReport, todayKey } from './lib/salesReport.js'
+import { splitTodayPayments } from './lib/paySplit.js'
+import { computeRestockAdvice } from './lib/restockAdvice.js'
 
 /** 构建单次快照（t+ { from, to } 从 rangePreset 取口径） */
 export function buildSnapshot(db, storeName = '我的门店') {
