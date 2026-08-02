@@ -678,7 +678,9 @@ if (deepBarcode) {
  * @param {{ db: import('node:sqlite').DatabaseSync, dataDir: string, basePort?: number }} opts
  *   db 注入业务库连接（照 commands.js 模式）；dataDir 用于存 token 与开关配置
  */
-export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, webRoot = null }) {
+let aiRef = null // v1.15: main.js 注入 ai 模块引用，供 ai:photoDraft 桥接
+export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, webRoot = null, ai = null }) {
+  if (ai) aiRef = ai
   const tokenPath = path.join(dataDir, 'server-token.txt')
   const configPath = path.join(dataDir, 'server-config.json')
   // 商品图片只读出口：/api/photo?path=<相对文件名>，路径校验与桌面端 fi-img 协议共用 photo.js
@@ -956,6 +958,57 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
       cmds.updateProduct(d, p?.productId, { photo_path: null })
       return { ok: true }
     },
+    // ---- v1.15 手机端新通道（只读/桥接，零新业务逻辑） ----
+    'product:search': (d, p) => {
+      const kw = String(p?.keyword ?? '').trim()
+      if (!kw) return []
+      const like = `%${kw}%`
+      return d.prepare(
+        `SELECT p.*, COALESCE((SELECT SUM(b2.quantity) FROM inventory_batches b2 WHERE b2.product_id = p.id),0) AS total_stock
+         FROM products p WHERE p.sku_code = ? OR p.barcode = ? OR p.brand LIKE ? OR p.model LIKE ? OR p.sku_code LIKE ?
+         LIMIT 20`
+      ).all(kw, kw, like, like, like)
+    },
+    'report:today': (d) => {
+      const rev = d.prepare(
+        `SELECT COALESCE(SUM((CASE WHEN t.type='return' THEN -1 ELSE 1 END) * t.selling_price * t.quantity),0) FROM transactions t WHERE t.notes!='换货退旧' AND date(t.timestamp,'localtime')=date('now','localtime')`
+      ).get()
+      const profit = d.prepare(
+        `SELECT COALESCE(SUM((CASE WHEN t.type='return' THEN -1 ELSE 1 END) * (t.selling_price - t.unit_price) * t.quantity),0) FROM transactions t WHERE t.notes!='换货退旧' AND date(t.timestamp,'localtime')=date('now','localtime')`
+      ).get()
+      const paySplit = cmds.todayPaymentSplit(d)
+      const orders = d.prepare(
+        `SELECT COUNT(*) AS n FROM (SELECT COUNT(*) FROM transactions t WHERE t.type='out' AND date(t.timestamp,'localtime')=date('now','localtime') GROUP BY t.id)`
+      ).get()
+      const recent = d.prepare(
+        `SELECT t.type, t.quantity, t.selling_price, t.unit_price, t.timestamp, t.operator, t.notes, p.brand, p.model, p.sku_code
+         FROM transactions t JOIN products p ON p.id = t.product_id
+         WHERE date(t.timestamp,'localtime') = date('now','localtime') ORDER BY t.timestamp DESC LIMIT 50`
+      ).all()
+      const receivable = d.prepare(
+        `SELECT COALESCE(SUM(owed - paid),0) FROM (SELECT c.id, COALESCE((SELECT SUM(selling_price*quantity) FROM transactions WHERE customer_id=c.id),0) AS owed, COALESCE((SELECT SUM(paid_amount) FROM transactions WHERE customer_id=c.id),0) AS paid FROM customers c)`
+      ).get()
+      return {
+        revenue: Object.values(rev)[0], profit: Object.values(profit)[0],
+        paySplit, recent, receivable: Object.values(receivable)[0],
+      }
+    },
+    'report:lowStock': (d) => cmds.lowStockProducts(d),
+    'supplier:list': (d) => {
+      const rows = d.prepare(
+        `SELECT s.id, s.name, s.phone,
+         COALESCE((SELECT SUM(b.quantity * b.cost_price) FROM inventory_batches b WHERE b.supplier_id = s.id),0) AS total_cost
+         FROM suppliers s ORDER BY s.name LIMIT 100`
+      ).all()
+      return rows
+    },
+    'ai:photoDraft': async (d, p) => {
+      if (!aiRef || !p?.imageBase64) return { ok: false, reason: 'no-key-or-image' }
+      try {
+        const r = await aiRef.parseInboundNote({ imageBase64: p.imageBase64, mimeType: p.mimeType || 'image/jpeg' })
+        return r
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
   }
 
   /** POST /api/invoke：{ channel, payload } → { ok:true, result }；业务错误 400 原样带中文提示 */
@@ -995,6 +1048,22 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
       // 业务校验错误（中文提示）原样返回，前端 catch 后直接展示
       sendJson(res, 400, { ok: false, error: e.message })
     }
+  }
+
+  /** GET /m：手机原生操作端。静态文件从 electron/mobile/ 目录读取，≤500KB 零依赖 */
+  function serveMobile(res, pathname) {
+    const mobileDir = path.join(__dirname, 'mobile')
+    const rel = pathname === '/m' || pathname === '/m/' ? 'index.html' : pathname.slice('/m/'.length)
+    if (rel.includes('..') || rel.includes('\\')) { sendJson(res, 404, { error: 'not found' }); return }
+    const root = path.resolve(mobileDir)
+    const abs = path.resolve(root, rel)
+    if (!abs.startsWith(root + path.sep)) { sendJson(res, 404, { error: 'not found' }); return }
+    try {
+      const data = fs.readFileSync(abs)
+      const mime = STATIC_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream'
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': mime, 'Cache-Control': 'no-cache' })
+      res.end(data)
+    } catch { sendJson(res, 404, { error: 'not found' }) }
   }
 
   /** GET /app：托管桌面网页版（dist）。代码公开、数据走 token，与手机页同一威胁模型 */
@@ -1061,6 +1130,11 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     // 桌面网页版（整机共享）：其他电脑/平板浏览器打开用全功能系统
     if (url.pathname === '/app' || url.pathname.startsWith('/app/')) {
       serveApp(res, url.pathname)
+      return
+    }
+    // 手机原生操作端（轻量单页应用，hash 路由，零依赖）
+    if (url.pathname === '/m' || url.pathname === '/m/' || url.pathname.startsWith('/m/')) {
+      serveMobile(res, url.pathname)
       return
     }
     // 商品图片（二进制端点，不走下面的 JSON 路由表）：token 鉴权 + resolvePath 防路径穿越，

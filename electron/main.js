@@ -451,7 +451,7 @@ app.whenReady().then(() => {
   ai.bindDb(db)
   registerIpc()
   // 手机看店服务：db 就绪后随备份调度一起启动；失败只告警不阻断桌面端
-  inventoryServer = createInventoryServer({ db, dataDir, webRoot: path.join(__dirname, '../dist') })
+  inventoryServer = createInventoryServer({ db, dataDir, webRoot: path.join(__dirname, '../dist'), ai })
   inventoryServer.start().catch((e) => console.error('[server] 启动失败:', e))
   const stopScheduler = scheduleDailyBackup(db, dbPath, backupDir, (e) =>
     reportBackupError('自动备份失败', e),

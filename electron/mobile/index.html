@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>渔具库存</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#333;padding-bottom:60px}
+#app{padding:12px;min-height:80vh}
+.nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #e8e8e8;z-index:100}
+.nav a{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px 4px 4px;font-size:11px;color:#999;text-decoration:none;border-top:2px solid transparent}
+.nav a.active{color:#1677ff;border-top-color:#1677ff}
+.nav a .icon{font-size:20px;line-height:1;margin-bottom:2px}
+.input{width:100%;padding:10px 12px;border:1px solid #d9d9d9;border-radius:8px;font-size:14px;outline:none}
+.input:focus{border-color:#1677ff}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;border-radius:8px;font-size:14px;font-weight:500;border:none;cursor:pointer}
+.btn-primary{background:#1677ff;color:#fff}
+.btn-danger{background:#ff4d4f;color:#fff}
+.btn-outline{background:#fff;color:#1677ff;border:1px solid #1677ff}
+.btn-block{width:100%}
+.btn-big{height:55px;font-size:17px;border-radius:12px}
+.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.badge-red{background:#fff2f0;color:#ff4d4f}
+.badge-green{background:#f6ffed;color:#52c41a}
+.badge-blue{background:#f0f5ff;color:#1677ff}
+.tag{display:inline-flex;align-items:center;padding:6px 14px;border-radius:20px;font-size:13px;background:#f0f2f5;color:#666;cursor:pointer;border:1px solid transparent}
+.tag.active{background:#f0f5ff;color:#1677ff;border-color:#1677ff}
+.flex{display:flex}.flex-col{flex-direction:column}.gap-sm{gap:6px}.gap{gap:10px}
+.items-center{align-items:center}.justify-between{justify-content:space-between}
+.text-sm{font-size:12px}.text-xs{font-size:11px}.text-lg{font-size:16px}.text-xl{font-size:18px}
+.text-muted{color:#999}.text-green{color:#52c41a}.text-red{color:#ff4d4f}.text-blue{color:#1677ff}
+.font-bold{font-weight:600}.text-right{text-align:right}.text-center{text-align:center}
+.mt-sm{margin-top:6px}.mt{margin-top:10px}.mb{margin-bottom:10px}.mb-sm{margin-bottom:6px}
+.pt{padding-top:10px}.pb{padding-bottom:10px}
+.w-full{width:100%}
+.hidden{display:none}
+.divider{border-top:1px solid #f0f0f0;margin:8px 0}
+.scan-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:55px;background:linear-gradient(135deg,#1677ff,#4096ff);color:#fff;border:none;border-radius:14px;font-size:18px;font-weight:600;cursor:pointer;box-shadow:0 4px 12px rgba(22,119,255,.3)}
+.scan-btn:active{transform:scale(.98)}
+.cart-item{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #f5f5f5}
+.cart-item .qty{width:36px;text-align:center;font-weight:600}
+.cart-total{display:flex;justify-content:space-between;align-items:center;padding:12px 0;font-size:18px;font-weight:600}
+.pay-btns{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.pay-btn{height:44px;border-radius:10px;border:1px solid #d9d9d9;background:#fff;font-size:16px;font-weight:500;cursor:pointer}
+.pay-btn.wechat{color:#07c160;border-color:#07c160}
+.pay-btn.alipay{color:#1677ff;border-color:#1677ff}
+.pay-btn.cash{color:#f5a623;border-color:#f5a623}
+#scan-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#000;z-index:200;display:none}
+#scan-overlay.show{display:flex;flex-direction:column}
+#scan-video{flex:1;object-fit:cover}
+.scan-close{position:absolute;top:16px;right:16px;width:40px;height:40px;border-radius:20px;background:rgba(255,255,255,.2);color:#fff;border:none;font-size:20px;cursor:pointer;z-index:10}
+.scan-input{position:absolute;bottom:80px;left:16px;right:16px;display:flex;gap:8px}
+.scan-input input{flex:1;padding:12px;border-radius:10px;border:none;font-size:16px}
+.scan-input button{padding:12px 18px;border-radius:10px;border:none;background:#1677ff;color:#fff;font-size:14px;cursor:pointer}
+.err-page{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:60vh;text-align:center;padding:20px}
+.err-page .icon{font-size:48px;margin-bottom:16px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<nav class="nav" id="nav">
+  <a href="#pos" class="active"><span class="icon">💰</span>开单</a>
+  <a href="#inbound"><span class="icon">📥</span>入库</a>
+  <a href="#stock"><span class="icon">🔍</span>库存</a>
+  <a href="#today"><span class="icon">📊</span>今日</a>
+  <a href="#more"><span class="icon">⋮</span>更多</a>
+</nav>
+<script src="app.js"></script>
+<script src="pages/pos.js"></script>
+<script src="pages/inbound.js"></script>
+<script src="pages/stock.js"></script>
+<script src="pages/today.js"></script>
+<script src="pages/restock.js"></script>
+<script src="pages/customers.js"></script>
+<script src="pages/suppliers.js"></script>
+<script src="pages/stocktake.js"></script>
+</body>
+</html>
