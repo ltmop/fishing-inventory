@@ -148,6 +148,7 @@ export function SettingsPage() {
   // 手机看店：局域网只读服务状态 + 二维码（URL 含访问 token）
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState('')
+  const [posQrDataUrl, setPosQrDataUrl] = useState('') // 手机开店 /m/ 二维码
   const [serverBusy, setServerBusy] = useState(false)
   const applyServerStatus = (s: ServerStatus | null) => {
     setServerStatus(s)
@@ -155,8 +156,14 @@ export function SettingsPage() {
       QRCode.toDataURL(s.url, { width: 220, margin: 1 })
         .then(setQrDataUrl)
         .catch(() => setQrDataUrl(''))
+      // 手机开店 /m/ 二维码（全功能操作端）
+      const mUrl = s.url.replace(/\/$/, '') + '/m/'
+      QRCode.toDataURL(mUrl, { width: 220, margin: 1 })
+        .then(setPosQrDataUrl)
+        .catch(() => setPosQrDataUrl(''))
     } else {
       setQrDataUrl('')
+      setPosQrDataUrl('')
     }
   }
   const handleServerToggle = async () => {
@@ -363,6 +370,7 @@ export function SettingsPage() {
       <MobileServerCard
         serverStatus={serverStatus}
         qrDataUrl={qrDataUrl}
+        posQrDataUrl={posQrDataUrl}
         serverBusy={serverBusy}
         onToggle={() => void handleServerToggle()}
         onRegenerateToken={handleRegenerateToken}

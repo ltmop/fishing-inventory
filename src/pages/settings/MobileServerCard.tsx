@@ -20,15 +20,17 @@ export interface ServerStatus {
 interface MobileServerCardProps {
   serverStatus: ServerStatus | null
   qrDataUrl: string
+  posQrDataUrl?: string
   serverBusy: boolean
   onToggle: () => void
   onRegenerateToken: () => void
 }
 
-/** 手机看店卡片：局域网只读服务，微信扫码看账 */
+/** 手机看店卡片：局域网只读服务，微信扫码看账 + 手机开店 /m/ 全功能操作端 */
 export function MobileServerCard({
   serverStatus,
   qrDataUrl,
+  posQrDataUrl,
   serverBusy,
   onToggle,
   onRegenerateToken,
@@ -88,6 +90,28 @@ export function MobileServerCard({
               <p className="text-xs text-muted-foreground">
                 怀疑链接泄露时点这个；旧二维码和手机书签会一起失效。
               </p>
+            </div>
+          </div>
+        )}
+        {/* 手机开店 /m/ 全功能操作端 */}
+        {serverStatus?.running && serverStatus.url && posQrDataUrl && (
+          <div className="flex flex-wrap items-start gap-5 rounded-lg bg-blue-50 px-4 py-4">
+            {posQrDataUrl ? (
+              <img src={posQrDataUrl} alt="手机开店二维码" className="size-[180px] rounded-lg border bg-white p-1" />
+            ) : (
+              <div className="flex size-[180px] items-center justify-center rounded-lg border bg-white text-xs text-muted-foreground">
+                二维码生成中…
+              </div>
+            )}
+            <div className="space-y-2 text-sm">
+              <div className="font-medium text-slate-800">手机开店 · 全功能操作端</div>
+              <div className="text-muted-foreground">
+                手机扫码开单、入库、查库存、看今日账——和电脑上一样用，专门给手机做了优化
+              </div>
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <p>· 开了店里的 WiFi 就能用，不花流量。</p>
+                <p>· 可以「添加到主屏幕」，桌面上会多个「阿东渔具」APP 图标。</p>
+              </div>
             </div>
           </div>
         )}
