@@ -1,7 +1,11 @@
 // 自动更新模块：electron-updater → COS generic provider
 // 铁律：try/catch 全部包裹，任何环节挂掉静默降级——挂了是手动更新，不是打不开
-import { autoUpdater } from 'electron-updater'
+// electron-updater 是 CJS 包（main=out/main.js），ESM 命名导入拿不到 autoUpdater，
+// 必须走 default 导入再解构（打包环境已实测命名导入直接启动崩溃）
+import electronUpdater from 'electron-updater'
 import { dialog } from 'electron'
+
+const { autoUpdater } = electronUpdater
 
 /** 初始化自动更新（COS generic provider，URL 在 package.json build.publish 配置） */
 export function initAutoUpdater() {
