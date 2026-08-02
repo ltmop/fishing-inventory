@@ -14,6 +14,12 @@ const badgeVariants = cva(
         outline: 'text-foreground',
         success: 'border-transparent bg-green-100 text-green-800',
         warning: 'border-transparent bg-amber-100 text-amber-800',
+        // 渔具印章风：红圆章(预警)/绿方章(正常)/金方章(待处理)
+        'seal-green': 'seal-green',
+        'seal-sand': 'seal-sand',
+        'seal-red': 'seal-red',
+        'seal-purple': 'inline-flex items-center gap-1 rounded border-2 border-purple-500 px-2 py-0.5 text-xs font-bold text-purple-600 bg-purple-50/70',
+        'seal-gray': 'inline-flex items-center gap-1 rounded border-2 border-slate-400 px-2 py-0.5 text-xs font-bold text-slate-500 bg-slate-100/70',
       },
     },
     defaultVariants: {

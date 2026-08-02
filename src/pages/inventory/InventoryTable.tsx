@@ -29,13 +29,13 @@ import type { ExpiringProduct, InventoryBatch, Product, ProductStatus, Supplier 
 
 export const LOW_STOCK_THRESHOLD = 5
 
-// 状态标签配色，一眼区分商品状态
-const STATUS_BADGE_CLASS: Record<ProductStatus, string> = {
-  已盘点: 'bg-green-100 text-green-700',
-  待盘点: 'bg-yellow-100 text-yellow-700',
-  已上架虾皮: 'bg-purple-100 text-purple-700',
-  已售罄: 'bg-red-100 text-red-700',
-  停产: 'bg-slate-200 text-slate-500',
+// 状态标签配色，一眼区分商品状态（渔具印章风：绿方章=正常，金方章=待处理，红圆章=售罄）
+const STATUS_BADGE_VARIANT: Record<ProductStatus, 'seal-green' | 'seal-sand' | 'seal-purple' | 'seal-red' | 'seal-gray'> = {
+  已盘点: 'seal-green',
+  待盘点: 'seal-sand',
+  已上架虾皮: 'seal-purple',
+  已售罄: 'seal-red',
+  停产: 'seal-gray',
 }
 
 type SortDir = 'asc' | 'desc'
@@ -253,7 +253,7 @@ export function InventoryTable({
                           })()}
                         </TableCell>
                         <TableCell className="py-1.5">
-                          <Badge className={STATUS_BADGE_CLASS[p.status]}>{p.status}</Badge>
+                          <Badge variant={STATUS_BADGE_VARIANT[p.status]}>{p.status}</Badge>
                         </TableCell>
                         <TableCell
                           className={cn('py-1.5 text-right font-medium', low && 'text-red-600')}

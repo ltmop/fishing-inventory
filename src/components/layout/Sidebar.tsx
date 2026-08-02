@@ -102,13 +102,13 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       )}
     >
       <div className={cn('flex items-center gap-2.5 px-4 py-5', collapsed && 'justify-center px-0')}>
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-sky-400/20">
-          <Fish className="size-5 text-sky-400" />
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-500 to-lake-500 shadow-lg shadow-brand-900/40 ring-1 ring-white/20">
+          <Fish className="size-5 text-white" />
         </div>
         {!collapsed && (
           <div className="leading-tight">
             <div className="text-sm font-bold text-white">渔具库存</div>
-            <div className="text-xs text-white/60">AI 管理系统</div>
+            <div className="text-xs text-white/60">AI 智能进销存</div>
           </div>
         )}
       </div>
@@ -124,11 +124,15 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             <NavItem key={item.to} {...item} collapsed={collapsed} large />
           ))}
         </div>
-        <div className="space-y-1 border-t border-white/10 pt-3">
+        <div className="space-y-1 pt-3">
           {!collapsed && (
-            <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-white/40">
-              管理
-            </div>
+            <>
+              {/* 水波纹分隔：渐变细线，像水面波纹 */}
+              <div className="mx-3 mb-2 h-px bg-gradient-to-r from-transparent via-lake-400/40 to-transparent" />
+              <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-white/40">
+                管理
+              </div>
+            </>
           )}
           {ADMIN_ITEMS.map((item) => (
             <NavItem key={item.to} {...item} collapsed={collapsed} />

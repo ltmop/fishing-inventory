@@ -12,7 +12,7 @@ export function Layout() {
   const error = useAppStore((s) => s.error)
 
   return (
-    <div className="flex min-h-screen bg-[#e8eef6]">
+    <div className="flex min-h-screen bg-gradient-to-br from-[#f2f6f9] via-[#eef3f8] to-[#e6eef5] dark:from-[#0f1b2d] dark:via-[#0f1b2d] dark:to-[#131f33]">
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <main className="flex-1 overflow-auto p-6">
         {/* 数据层错误条：加载失败等全局问题在这里亮出来，而不是闷死 */}

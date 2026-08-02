@@ -47,12 +47,14 @@ export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
         }
         role={spec.action ? 'button' : undefined}
         tabIndex={spec.action ? 0 : undefined}
-        className={`h-full border-0 shadow-card transition-shadow hover:shadow-card-hover ${spec.cardClass} ${
+        className={`group h-full border-0 shadow-card transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover ${
+          spec.featured ? 'hover:shadow-brand-900/20' : ''
+        } ${spec.cardClass} ${
           spec.pulse ? 'animate-pulse' : ''
         } ${spec.action ? 'cursor-pointer focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:outline-none' : ''}`}
       >
         <CardContent className={spec.featured ? 'flex h-full items-center gap-5 pt-6' : 'pt-6'}>
-          <div className={`inline-flex rounded-full p-2.5 ${spec.iconClass} ${spec.featured ? 'mb-0 p-3.5' : 'mb-3'}`}>
+          <div className={`inline-flex rounded-full p-2.5 transition-transform duration-200 group-hover:scale-110 ${spec.iconClass} ${spec.featured ? 'mb-0 p-3.5' : 'mb-3'}`}>
             <Icon className={spec.featured ? 'size-7' : 'size-5'} />
           </div>
           <div>
