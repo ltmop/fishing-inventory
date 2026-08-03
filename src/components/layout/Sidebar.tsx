@@ -97,7 +97,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <aside
       className={cn(
-        'flex h-screen flex-col bg-gradient-to-b from-brand-800 to-brand-900 transition-all duration-200',
+        'flex h-screen flex-col bg-gradient-to-b from-brand-800 to-brand-900 transition-all duration-200 dark:from-[#0d1b30] dark:to-[#081426] dark:border-r dark:border-[#1a2c48]',
         collapsed ? 'w-16' : 'w-60',
       )}
     >

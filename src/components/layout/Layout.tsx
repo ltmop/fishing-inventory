@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { motion } from 'motion/react'
 import { Sidebar } from './Sidebar'
+import { TopBar } from './TopBar'
 import { CommandPalette } from '@/components/CommandPalette'
 import { LowStockAlert } from '@/components/LowStockAlert'
 import { useAppStore } from '@/store/appStore'
@@ -12,9 +13,12 @@ export function Layout() {
   const error = useAppStore((s) => s.error)
 
   return (
-    <div className="flex min-h-screen bg-gradient-to-br from-[#f2f6f9] via-[#eef3f8] to-[#e6eef5] dark:from-[#0f1b2d] dark:via-[#0f1b2d] dark:to-[#131f33]">
+    <div className="flex min-h-screen bg-gradient-to-br from-[#f2f6f9] via-[#eef3f8] to-[#e6eef5] dark:from-[#0a1628] dark:via-[#0c1a2e] dark:to-[#0a1628]">
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
-      <main className="flex-1 overflow-auto p-6">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* 顶栏：现代后台骨架 */}
+        <TopBar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+        <main className="flex-1 overflow-auto p-6">
         {/* 数据层错误条：加载失败等全局问题在这里亮出来，而不是闷死 */}
         {error && (
           <div className="mb-4 flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 shadow-sm">
@@ -36,7 +40,8 @@ export function Layout() {
         >
           <Outlet />
         </motion.div>
-      </main>
+        </main>
+      </div>
       {/* 低库存开机提醒：每次启动弹一次 */}
       <LowStockAlert />
       {/* Ctrl+K 全局命令面板 */}
