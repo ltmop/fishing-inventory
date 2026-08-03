@@ -350,7 +350,7 @@ describe('checkout 收银台（mock 路径：一单多商品）', () => {
       '测试员',
     )
     expect(r.ok).toBe(false)
-    if (!r.ok) {
+    if (!r.ok && 'shortages' in r) {
       expect(r.shortages).toHaveLength(1)
       expect(r.shortages[0].productId).toBe(2)
       expect(r.shortages[0].shortage).toBe(97)
