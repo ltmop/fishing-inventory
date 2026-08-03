@@ -15,6 +15,7 @@ import {
   Settings,
   Wallet,
   PackageX,
+  Link2,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
@@ -33,6 +34,7 @@ const ADMIN_ITEMS = [
   { to: '/reports', label: '经营报表', icon: BarChart3 },
   { to: '/expenses', label: '支出记账', icon: Wallet },
   { to: '/waste', label: '报损登记', icon: PackageX },
+  { to: '/parts', label: '配节管理', icon: Link2 },
   { to: '/purchase', label: '采购订货', icon: ClipboardList },
   { to: '/stock-take', label: '盘点管理', icon: ClipboardCheck },
   { to: '/customers', label: '客户', icon: Users },

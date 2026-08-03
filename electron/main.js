@@ -151,6 +151,10 @@ function registerIpc() {
   handle('waste:create', (d, p) => commands.createWaste(d, p))
   handle('waste:list', (d, p) => commands.listWastes(d, p ?? {}))
   handle('waste:summary', (d, p) => commands.wasteSummary(d, p ?? {}))
+  // 配节管理：设配节关系 / 查主竿配节 / 查所有配节
+  handle('part:set', (d, p) => commands.setPart(d, p))
+  handle('part:list', (d, p) => commands.partsOf(d, p ?? {}))
+  handle('part:all', (d, p) => commands.allParts(d, p ?? {}))
   // 采购订单：建单/列表/详情/收货入库/取消
   handle('po:create', (d, p) => commands.createPurchaseOrder(d, p))
   handle('po:list', (d, p) => commands.listPurchaseOrders(d, p))

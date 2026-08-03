@@ -258,6 +258,7 @@ function runMigrations(db) {
     ['收款方式补列', migratePayMethod],
     ['批次到期日补列', migrateBatchExpiry],
     ['盘点模式补列', migrateStockTakeMode],
+    ['配节字段补列', migratePartFields],
   ]
   const failures = []
   for (const [name, fn] of steps) {
@@ -467,6 +468,13 @@ function migrateStockTakeMode(db) {
   if (!cols.includes('mode')) {
     db.exec("ALTER TABLE stock_takes ADD COLUMN mode TEXT DEFAULT 'batch'")
   }
+}
+
+// ---------- 配节字段迁移（v2.1）：products 补 parent_id（父主竿）+ part_type（配节类型：竿梢/手把节等） ----------
+function migratePartFields(db) {
+  const cols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name)
+  if (!cols.includes('parent_id')) db.exec('ALTER TABLE products ADD COLUMN parent_id INTEGER REFERENCES products(id)')
+  if (!cols.includes('part_type')) db.exec('ALTER TABLE products ADD COLUMN part_type TEXT')
 }
 
 /** 软件正常退出时调用一次：收尾 checkpoint，截断 WAL */

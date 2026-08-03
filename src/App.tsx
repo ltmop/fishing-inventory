@@ -13,6 +13,7 @@ import { SuppliersPage } from '@/pages/SuppliersPage'
 import { CustomersPage } from '@/pages/CustomersPage'
 import { ExpensesPage } from '@/pages/ExpensesPage'
 import { WastePage } from '@/pages/WastePage'
+import { PartsPage } from '@/pages/PartsPage'
 import { AuditLogPage } from '@/pages/AuditLogPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ImportPage } from '@/pages/ImportPage'
@@ -127,6 +128,7 @@ function App() {
             <Route path="customers" element={<CustomersPage />} />
             <Route path="expenses" element={<ExpensesPage />} />
             <Route path="waste" element={<WastePage />} />
+            <Route path="parts" element={<PartsPage />} />
             <Route path="audit" element={<AuditLogPage />} />
             <Route path="import" element={<ImportPage />} />
             <Route path="settings" element={<SettingsPage />} />
