@@ -102,6 +102,8 @@ export interface InventoryBatch {
   location: string | null
   inbound_date: string // YYYY-MM-DD
   supplier_id: number | null
+  /** 批次到期日（保质期商品）：饵料/小药/活饵入库时记录，FEFO 先到期先出 + 临期按批次预警 */
+  expiry_date?: string | null
   notes?: string | null
   created_at?: string
 }
