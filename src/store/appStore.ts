@@ -39,6 +39,8 @@ export interface InboundInput {
   location: string | null
   supplierId: number | null
   operator: string
+  /** 批次到期日（保质期商品）：YYYY-MM-DD，可选 */
+  expiryDate?: string
 }
 
 export interface NewProductInput {
@@ -646,9 +648,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { ok: true as const, updated: ids.length, tiersUpdated }
   },
 
-  addInbound: async ({ productId, quantity, costPrice, location, supplierId, operator }) => {
+  addInbound: async ({ productId, quantity, costPrice, location, supplierId, operator, expiryDate }) => {
     if (backend) {
-      await backend.invoke('inbound:create', { productId, quantity, costPrice, location, supplierId, operator })
+      await backend.invoke('inbound:create', { productId, quantity, costPrice, location, supplierId, operator, expiryDate: expiryDate || undefined })
       await get().loadAll()
       return
     }
@@ -660,6 +662,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       batch_no: genBatchNo(batchId),
       quantity,
       cost_price: costPrice,
+      expiry_date: expiryDate || null,
       location,
       inbound_date: new Date().toISOString().slice(0, 10),
       supplier_id: supplierId,
