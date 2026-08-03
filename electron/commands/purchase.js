@@ -121,13 +121,19 @@ export function receivePurchaseOrder(db, { id, items, operator }) {
         )
       }
       // 入库：批次成本=订单进价，流水 notes 标注采购单号（与 createInbound 同口径，内联避免嵌套事务）
+      // 到期日可选：it.expiryDate 传了且格式对才落库，否则该批次无保质期
+      let expiry = null
+      if (it.expiryDate) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(it.expiryDate))) throw new Error('到期日格式不对，应该是 YYYY-MM-DD')
+        expiry = String(it.expiryDate)
+      }
       const batchNo = nextBatchNo(db)
       const batchInfo = db
         .prepare(
-          `INSERT INTO inventory_batches (product_id, batch_no, quantity, cost_price, location, inbound_date, supplier_id)
-           VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+          `INSERT INTO inventory_batches (product_id, batch_no, quantity, cost_price, location, inbound_date, supplier_id, expiry_date)
+           VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
         )
-        .run(line.product_id, batchNo, it.quantity, line.unit_cost, today(), po.supplier_id)
+        .run(line.product_id, batchNo, it.quantity, line.unit_cost, today(), po.supplier_id, expiry)
       const batchId = Number(batchInfo.lastInsertRowid)
       db.prepare(
         `INSERT INTO transactions (product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes)

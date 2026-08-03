@@ -296,7 +296,7 @@ interface AppState {
   createStockTake: (
     locationFilter: string | null,
     operator: string,
-    filters?: { category?: Category | null; supplierId?: number | null },
+    filters?: { category?: Category | null; supplierId?: number | null; mode?: 'batch' | 'sku' },
   ) => Promise<StockTake>
   updateStockTakeItem: (itemId: number, actualQty: number, reason: string) => Promise<void>
   completeStockTake: (takeId: number) => Promise<void>
@@ -1617,6 +1617,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         operator,
         category: filters?.category ?? null,
         supplierId: filters?.supplierId ?? null,
+        mode: filters?.mode ?? 'batch',
       })
       await get().loadAll()
       return take

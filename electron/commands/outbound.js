@@ -60,11 +60,16 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
       const cust = db.prepare('SELECT id FROM customers WHERE id = ?').get(customerId)
       if (!cust) throw new Error('客户不存在')
     }
+    // FEFO：先到期先出（有 expiry_date 的按到期日升序优先扣），无到期日的按 FIFO 兜底
     const batches = db
       .prepare(
         `SELECT * FROM inventory_batches
          WHERE product_id = ? AND quantity > 0
-         ORDER BY inbound_date ASC, id ASC`,
+         ORDER BY
+           CASE WHEN expiry_date IS NULL THEN 1 ELSE 0 END,
+           expiry_date ASC,
+           inbound_date ASC,
+           id ASC`,
       )
       .all(productId)
     const total = batches.reduce((s, b) => s + b.quantity, 0)
@@ -78,9 +83,14 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
     const methodForTx = isCredit && paidAmount === 0 ? null : payMethod
     let paidLeft = isCredit ? paidAmount : 0
     const allocations = []
+    const expiredBatches = [] // 涉及已过期批次 → 前端提示，不硬拦截（老板可能低价处理）
+    const todayStr = now().slice(0, 10)
     let remaining = quantity
     for (const b of batches) {
       if (remaining <= 0) break
+      if (b.expiry_date && b.expiry_date < todayStr) {
+        expiredBatches.push({ batch_no: b.batch_no, expiry_date: b.expiry_date, quantity: b.quantity })
+      }
       const deduct = Math.min(b.quantity, remaining)
       const after = b.quantity - deduct
       db.prepare('UPDATE inventory_batches SET quantity = ? WHERE id = ?').run(after, b.id)
@@ -112,6 +122,7 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
       totalDue,
       paidAmount: isCredit ? paidAmount : null,
       creditAmount: isCredit ? totalDue - paidAmount : 0,
+      expiredBatches,
     }
   })
 }
@@ -157,7 +168,11 @@ export function confirmCheckout(db, { items, customerId, paidAmount, payMethod, 
         .prepare(
           `SELECT * FROM inventory_batches
            WHERE product_id = ? AND quantity > 0
-           ORDER BY inbound_date ASC, id ASC`,
+           ORDER BY
+             CASE WHEN expiry_date IS NULL THEN 1 ELSE 0 END,
+             expiry_date ASC,
+             inbound_date ASC,
+             id ASC`,
         )
         .all(l.productId)
       const total = batches.reduce((s, b) => s + b.quantity, 0)
@@ -288,7 +303,11 @@ export function createExchange(db, { oldProductId, newProductId, quantity, selli
       .prepare(
         `SELECT * FROM inventory_batches
          WHERE product_id = ? AND quantity > 0
-         ORDER BY inbound_date ASC, id ASC`,
+         ORDER BY
+           CASE WHEN expiry_date IS NULL THEN 1 ELSE 0 END,
+           expiry_date ASC,
+           inbound_date ASC,
+           id ASC`,
       )
       .all(newProductId)
     const total = newBatches.reduce((s, b) => s + b.quantity, 0)

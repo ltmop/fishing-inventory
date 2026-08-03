@@ -62,18 +62,35 @@ export function todayPaymentSplit(db) {
 // ---------- 过期预警（饵料等保质期商品） ----------
 
 /**
- * 临期/过期商品：expiry_date 在未来 N 天内（含已过期），且当前库存 > 0，按过期日升序。
- * 返回：名称/SKU/过期日/剩余天数（负=已过期）/库存量/expired 标记
+ * 临期/过期预警（按批次算）：同一商品多个批次各自有到期日，分别预警。
+ * 只统计批次级 expiry_date（入/收货时记录），且该批次剩余库存 > 0，按过期日升序。
+ * 返回：名称/SKU/批次号/过期日/剩余天数（负=已过期）/该批次库存量/expired 标记
+ * 兼容：保留商品级 id 字段，前端可按商品聚合也可按批次看明细。
  */
 export function expiringProducts(db, { days = 30 } = {}) {
   const n = Math.max(parseInt(days, 10) || 30, 0)
+  // 批次级（主）：每个有到期日的批次一条，剩余量 = 该批次数量
   const rows = db
+    .prepare(
+      `SELECT b.id AS batch_id, b.batch_no, b.expiry_date, b.quantity AS stock,
+              p.id, p.sku_code, p.brand, p.model
+       FROM inventory_batches b
+       JOIN products p ON p.id = b.product_id
+       WHERE b.expiry_date IS NOT NULL AND b.expiry_date <> '' AND b.quantity > 0`,
+    )
+    .all()
+  // 商品级兜底（老数据）：商品有 expiry_date 但所有批次都没填到期日 → 按商品级日期预警
+  const legacyRows = db
     .prepare(
       `SELECT p.id, p.sku_code, p.brand, p.model, p.expiry_date, COALESCE(s.q, 0) AS stock
        FROM products p
        LEFT JOIN (SELECT product_id, SUM(quantity) AS q FROM inventory_batches GROUP BY product_id) s
          ON s.product_id = p.id
-       WHERE p.expiry_date IS NOT NULL AND p.expiry_date <> '' AND COALESCE(s.q, 0) > 0`,
+       WHERE p.expiry_date IS NOT NULL AND p.expiry_date <> '' AND COALESCE(s.q, 0) > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM inventory_batches b
+           WHERE b.product_id = p.id AND b.expiry_date IS NOT NULL AND b.expiry_date <> ''
+         )`,
     )
     .all()
   const todayMid = new Date()
@@ -86,6 +103,26 @@ export function expiringProducts(db, { days = 30 } = {}) {
     if (daysLeft > n) continue
     out.push({
       id: r.id,
+      batch_id: r.batch_id,
+      batch_no: r.batch_no,
+      name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
+      sku: r.sku_code,
+      expiry_date: r.expiry_date,
+      daysLeft,
+      expired: daysLeft < 0,
+      stock: r.stock,
+      _sort: exp.getTime(),
+    })
+  }
+  for (const r of legacyRows) {
+    const exp = parseExpiryDate(r.expiry_date)
+    if (!exp) continue
+    const daysLeft = Math.round((exp.getTime() - todayMid.getTime()) / 86400000)
+    if (daysLeft > n) continue
+    out.push({
+      id: r.id,
+      batch_id: null,
+      batch_no: null,
       name: [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code,
       sku: r.sku_code,
       expiry_date: r.expiry_date,

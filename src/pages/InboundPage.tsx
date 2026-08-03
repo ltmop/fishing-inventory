@@ -73,6 +73,8 @@ export function InboundPage() {
   const [location, setLocation] = useState('')
   const [supplierId, setSupplierId] = useState(NO_SUPPLIER)
   const [operator, setOperator] = useState('阿东')
+  // 到期日（保质期商品用，可选）：饵料/小药/活饵等入库时填"该批到期日"，临期预警按批次算
+  const [expiryDate, setExpiryDate] = useState('')
 
   // 新建商品 Dialog（元字符串表单；安全库存空串=不单独设，按默认 5 预警）
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -165,6 +167,7 @@ export function InboundPage() {
         location: location.trim() || null,
         supplierId: supplierId === NO_SUPPLIER ? null : Number(supplierId),
         operator: operator.trim() || '未署名',
+        expiryDate: expiryDate.trim() || undefined,
       })
       playSound('success')
       setSuccess(`已入库：${productName(matched)} × ${qty}`)
@@ -432,6 +435,8 @@ export function InboundPage() {
           suppliers={suppliers}
           operator={operator}
           onOperatorChange={setOperator}
+          expiryDate={expiryDate}
+          onExpiryDateChange={setExpiryDate}
           submitting={submitting}
           onConfirm={handleConfirm}
           onOpenCreate={() => setDialogOpen(true)}

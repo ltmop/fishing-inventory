@@ -31,6 +31,9 @@ interface MatchedProductCardProps {
   suppliers: Supplier[]
   operator: string
   onOperatorChange: (v: string) => void
+  /** 到期日（保质期商品用，可选）：饵料/小药/活饵入库时填，临期预警按批次算 */
+  expiryDate: string
+  onExpiryDateChange: (v: string) => void
   submitting: boolean
   onConfirm: () => void
   onOpenCreate: () => void
@@ -54,6 +57,8 @@ export function MatchedProductCard({
   suppliers,
   operator,
   onOperatorChange,
+  expiryDate,
+  onExpiryDateChange,
   submitting,
   onConfirm,
   onOpenCreate,
@@ -95,7 +100,7 @@ export function MatchedProductCard({
             <div className="font-semibold text-slate-800">{formatPrice(lastCost)}</div>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
           <div className="space-y-1">
             <Label>入库数量 *</Label>
             <Input
@@ -138,6 +143,15 @@ export function MatchedProductCard({
           <div className="space-y-1">
             <Label>操作人</Label>
             <Input value={operator} onChange={(e) => onOperatorChange(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <Label>到期日（可选）</Label>
+            <Input
+              type="date"
+              value={expiryDate}
+              onChange={(e) => onExpiryDateChange(e.target.value)}
+              title="饵料/小药/活饵等保质期商品填这个批次的到期日，临期预警按批次提醒"
+            />
           </div>
         </div>
         {/* 操作区沉底：与信息区分层 */}

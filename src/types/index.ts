@@ -330,6 +330,8 @@ export interface StockTake {
   location_filter: string | null
   category_filter?: Category | null // 赊账包新增：按品类盘点（与货位/供应商取交集）
   supplier_filter?: number | null // 赊账包新增：按供应商盘点
+  /** 盘点方式：batch=按批次逐行 / sku=按商品盘总数（v2.1 新增） */
+  mode?: 'batch' | 'sku'
   started_at: string
   completed_at: string | null
   operator: string

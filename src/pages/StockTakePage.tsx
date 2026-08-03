@@ -45,6 +45,7 @@ export function StockTakePage() {
   const [area, setArea] = useState(WHOLE_SHOP)
   const [category, setCategory] = useState(WHOLE_SHOP)
   const [supplierKey, setSupplierKey] = useState(WHOLE_SHOP)
+  const [mode, setMode] = useState<'batch' | 'sku'>('batch')
   const [operator, setOperator] = useState('阿东')
 
   // 完成盘点确认 Dialog
@@ -89,6 +90,7 @@ export function StockTakePage() {
       const take = await createStockTake(area === WHOLE_SHOP ? null : area, operator.trim() || '未署名', {
         category: category === WHOLE_SHOP ? null : (category as Category),
         supplierId: supplierKey === WHOLE_SHOP ? null : Number(supplierKey),
+        mode,
       })
       setCreateOpen(false)
       openTake(take)
@@ -265,6 +267,8 @@ export function StockTakePage() {
         onSupplierKeyChange={setSupplierKey}
         operator={operator}
         onOperatorChange={setOperator}
+        mode={mode}
+        onModeChange={setMode}
         areas={areas}
         suppliers={suppliers}
         wholeShopValue={WHOLE_SHOP}

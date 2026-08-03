@@ -30,6 +30,13 @@ import type { ExpiringProduct, InventoryBatch, Product, ProductStatus, Supplier 
 
 export const LOW_STOCK_THRESHOLD = 5
 
+/** 本地日期串 YYYY-MM-DD（批次到期日比较用，避免 UTC 时区偏移） */
+function todayKeyStr() {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
 // 状态标签配色，一眼区分商品状态（渔具印章风：绿方章=正常，金方章=待处理，红圆章=售罄）
 const STATUS_BADGE_VARIANT: Record<ProductStatus, 'seal-green' | 'seal-sand' | 'seal-purple' | 'seal-red' | 'seal-gray'> = {
   已盘点: 'seal-green',
@@ -364,6 +371,7 @@ export function InventoryTable({
                                         />
                                       </button>
                                     </TableHead>
+                                    <TableHead>到期日</TableHead>
                                     <TableHead>货位</TableHead>
                                     <TableHead>供应商</TableHead>
                                   </TableRow>
@@ -379,6 +387,22 @@ export function InventoryTable({
                                         {formatPrice(b.cost_price)}
                                       </TableCell>
                                       <TableCell>{formatDate(b.inbound_date)}</TableCell>
+                                      <TableCell>
+                                        {b.expiry_date ? (
+                                          <span
+                                            className={
+                                              b.expiry_date < todayKeyStr()
+                                                ? 'font-medium text-red-600'
+                                                : 'text-amber-600'
+                                            }
+                                          >
+                                            {formatDate(b.expiry_date)}
+                                            {b.expiry_date < todayKeyStr() && ' 已过期'}
+                                          </span>
+                                        ) : (
+                                          '-'
+                                        )}
+                                      </TableCell>
                                       <TableCell>{b.location ?? '-'}</TableCell>
                                       <TableCell>
                                         {suppliers.find((s) => s.id === b.supplier_id)?.name ??

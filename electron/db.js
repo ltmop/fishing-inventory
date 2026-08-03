@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS inventory_batches (
     location TEXT,
     inbound_date DATE NOT NULL,
     notes TEXT,
+    -- 批次到期日（保质期商品：饵料/小药/活饵用；NULL=无保质期）。FEFO 先到期先出 + 临期按批次预警
+    expiry_date TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -242,6 +244,8 @@ function runMigrations(db) {
     ['客户价格档补列', migrateCustomerPriceLevel],
     ['安全库存补列', migrateMinStock],
     ['收款方式补列', migratePayMethod],
+    ['批次到期日补列', migrateBatchExpiry],
+    ['盘点模式补列', migrateStockTakeMode],
   ]
   const failures = []
   for (const [name, fn] of steps) {
@@ -434,6 +438,22 @@ function migratePayMethod(db) {
   const cols = db.prepare('PRAGMA table_info(transactions)').all().map((c) => c.name)
   if (!cols.includes('pay_method')) {
     db.exec("ALTER TABLE transactions ADD COLUMN pay_method TEXT CHECK (pay_method IN ('现金','微信','支付宝','其他'))")
+  }
+}
+
+// ---------- 批次到期日迁移（v2.1）：老库 inventory_batches 补 expiry_date（NULL=无保质期） ----------
+function migrateBatchExpiry(db) {
+  const cols = db.prepare('PRAGMA table_info(inventory_batches)').all().map((c) => c.name)
+  if (!cols.includes('expiry_date')) {
+    db.exec('ALTER TABLE inventory_batches ADD COLUMN expiry_date TEXT')
+  }
+}
+
+// ---------- 盘点模式迁移（v2.1）：老库 stock_takes 补 mode（'batch'=按批次 / 'sku'=按SKU合并） ----------
+function migrateStockTakeMode(db) {
+  const cols = db.prepare('PRAGMA table_info(stock_takes)').all().map((c) => c.name)
+  if (!cols.includes('mode')) {
+    db.exec("ALTER TABLE stock_takes ADD COLUMN mode TEXT DEFAULT 'batch'")
   }
 }
 

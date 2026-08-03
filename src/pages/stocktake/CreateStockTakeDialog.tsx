@@ -31,6 +31,9 @@ interface CreateStockTakeDialogProps {
   onSupplierKeyChange: (v: string) => void
   operator: string
   onOperatorChange: (v: string) => void
+  /** 盘点方式：batch=按批次逐行 / sku=按商品合并盘总数 */
+  mode: 'batch' | 'sku'
+  onModeChange: (v: 'batch' | 'sku') => void
   areas: string[]
   suppliers: Supplier[]
   wholeShopValue: string
@@ -50,6 +53,8 @@ export function CreateStockTakeDialog({
   onSupplierKeyChange,
   operator,
   onOperatorChange,
+  mode,
+  onModeChange,
   areas,
   suppliers,
   wholeShopValue,
@@ -117,6 +122,23 @@ export function CreateStockTakeDialog({
           <div className="space-y-1">
             <Label>操作人</Label>
             <Input value={operator} onChange={(e) => onOperatorChange(e.target.value)} />
+          </div>
+          <div className="col-span-2 space-y-1">
+            <Label>盘点方式</Label>
+            <Select value={mode} onValueChange={(v) => onModeChange(v as 'batch' | 'sku')}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="batch">按批次逐行（同商品多批拆开分别点）</SelectItem>
+                <SelectItem value="sku">按商品盘总数（货架分不清批次时用这个）</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {mode === 'sku'
+                ? '按商品只填"一共多少个"，系统自动把差异按各批次数量比例分摊'
+                : '每个批次单独填实盘数，精确到批次'}
+            </p>
           </div>
         </div>
         <DialogFooter>

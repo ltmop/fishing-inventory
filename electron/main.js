@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { openDatabase, finalCheckpoint } from './db.js'
 import * as commands from './commands.js'
 import * as ai from './ai.js'
+import * as doubao from './doubao.js'
 import * as voice from './voice.js'
 import * as tts from './tts.js'
 import * as kws from './kws.js'
@@ -45,6 +46,7 @@ const getExtraDir = () => loadBackupConfig(backupConfigPath).extraDir
 // 商品图片目录：<productId>.<ext>，读写与路径校验全在 photo.js（无 Electron 依赖，可单测）
 const photoStore = createPhotoStore(path.join(dataDir, 'images'))
 ai.initAi(dataDir)
+doubao.initDoubao(dataDir)
 // 离线语音识别模型目录：首次启动后可经 voice:download 通道下载到本机
 const voiceModelDir = path.join(dataDir, 'models', MODEL_NAME)
 voice.initVoice(voiceModelDir)
@@ -229,6 +231,12 @@ function registerIpc() {
   handle('ai:chat', (d, p) => ai.agentChat(p.messages ?? []))
   handle('ai:parseInboundNote', (d, p) => ai.parseInboundNote(p))
   handle('ai:transcribe', (d, p) => ai.transcribeAudio(p))
+  // 豆包视觉模型 2.1：分析店面照片 → 区位布局 / 货架品类识别
+  handle('doubao:status', () => doubao.doubaoStatus())
+  handle('doubao:setKey', (d, p) => doubao.setDoubaoKey(p.key))
+  handle('doubao:clearKey', () => doubao.clearDoubaoKey())
+  handle('doubao:analyzeImage', (d, p) => doubao.analyzeImage(p))
+  handle('doubao:chat', (d, p) => doubao.doubaoChat(p.message))
   // 离线语音识别（sherpa-onnx 本地模型）：模型就绪时渲染端走 voice:transcribe（PCM 本地识别），
   // 未就绪时渲染端自动回退 ai:transcribe（base64 云端识别），两条通道并存互不干扰
   handle('voice:status', () => ({ ...voice.voiceStatus(), downloading: !!voiceDownloading }))
