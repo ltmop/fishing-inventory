@@ -63,27 +63,27 @@ export function TodaySalesCard({ summary, paySplit, aiLoading, aiText }: TodaySa
         ) : (
           <>
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <div className="rounded-xl bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">今日营业额</div>
-                <div className="text-xl font-bold text-slate-800 tabular-nums">
+              <div className="rounded-xl bg-gradient-to-br from-[#0d1b30] to-[#16283f] px-4 py-3">
+                <div className="text-xs text-slate-300">今日营业额</div>
+                <div className="text-xl font-bold text-gold-300 tabular-nums">
                   {formatPrice(summary.revenue)}
                 </div>
               </div>
-              <div className="rounded-xl bg-green-50 px-4 py-3">
-                <div className="text-xs text-green-600">今日毛利</div>
-                <div className="text-xl font-bold text-green-700 tabular-nums">
+              <div className="rounded-xl bg-gradient-to-br from-lake-900/70 to-[#16283f] px-4 py-3">
+                <div className="text-xs text-lake-200/80">今日毛利</div>
+                <div className="text-xl font-bold text-lake-300 tabular-nums">
                   {formatPrice(summary.profit)}
                 </div>
               </div>
-              <div className="rounded-xl bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">毛利率</div>
-                <div className="text-xl font-bold text-slate-800 tabular-nums">
+              <div className="rounded-xl bg-gradient-to-br from-[#122038] to-[#16283f] px-4 py-3">
+                <div className="text-xs text-slate-300">毛利率</div>
+                <div className="text-xl font-bold text-slate-100 tabular-nums">
                   {summary.margin !== null ? `${(summary.margin * 100).toFixed(1)}%` : '-'}
                 </div>
               </div>
-              <div className="rounded-xl bg-slate-50 px-4 py-3">
-                <div className="text-xs text-slate-500">售出件数</div>
-                <div className="text-xl font-bold text-slate-800 tabular-nums">
+              <div className="rounded-xl bg-gradient-to-br from-[#122038] to-[#16283f] px-4 py-3">
+                <div className="text-xs text-slate-300">售出件数</div>
+                <div className="text-xl font-bold text-slate-100 tabular-nums">
                   {summary.qty}
                 </div>
               </div>
