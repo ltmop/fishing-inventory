@@ -91,6 +91,8 @@ export interface CreditOptions {
   paidAmount?: number | null
   tier?: PriceLevel | null
   payMethod?: PaymentMethod | null
+  /** 出库拦截过期：true 表示老板确认过含过期批次，放行（临期/过期低价处理） */
+  allowExpired?: boolean
 }
 
 /** 换货结果（与后端 createExchange 返回对齐）：diff>0 客户补钱，diff<0 退钱（refundHandling 说明实际处理方式） */
