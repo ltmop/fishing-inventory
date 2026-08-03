@@ -166,9 +166,16 @@ export interface CheckoutShortage {
   shortage: number
 }
 
+export interface ExpiredProductInfo {
+  productId: number
+  name: string
+  expiredBatches: { batch_no: string; expiry_date: string; quantity: number }[]
+}
+
 export type CheckoutResult =
   | { ok: true; lines: unknown[]; totalDue: number; paidAmount: number | null; creditAmount: number }
   | { ok: false; shortages: CheckoutShortage[] }
+  | { ok: false; expired: true; expiredProducts: ExpiredProductInfo[] }
 
 
 export interface Payment {
