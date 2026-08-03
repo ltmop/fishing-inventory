@@ -72,7 +72,7 @@ function NavItem({
           'flex items-center gap-3 rounded-md text-sm font-medium transition-all duration-150',
           collapsed ? 'justify-center px-0 py-2.5' : large ? 'px-3 py-2.5' : 'px-3 py-2',
           isActive
-            ? 'bg-gold-500/15 text-gold-200 shadow-[inset_3px_0_0_0] shadow-gold-500'
+            ? 'border-l-[3px] border-gold-400 bg-gradient-to-r from-gold-500/25 to-gold-500/5 text-gold-100'
             : 'text-white/70 hover:bg-white/10 hover:text-white',
         )
       }
@@ -97,10 +97,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <aside
       className={cn(
-        'flex h-screen flex-col bg-gradient-to-b from-brand-800 to-brand-900 transition-all duration-200 dark:from-[#0d1b30] dark:to-[#081426] dark:border-r dark:border-[#1a2c48]',
+        'relative flex h-screen flex-col overflow-hidden bg-gradient-to-b from-brand-800 to-brand-900 transition-all duration-200 dark:from-[#0d1b30] dark:to-[#081426] dark:border-r dark:border-[#1a2c48]',
         collapsed ? 'w-16' : 'w-60',
       )}
     >
+      {/* 底部金色氛围光晕 */}
+      <div className="pointer-events-none absolute -bottom-24 left-1/2 h-48 w-48 -translate-x-1/2 rounded-full bg-gold-500/10 blur-3xl" />
       <div className={cn('flex items-center gap-2.5 px-4 py-5', collapsed && 'justify-center px-0')}>
         <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-gold-400 to-gold-600 shadow-lg shadow-gold-900/50 ring-1 ring-gold-200/40">
           <Fish className="size-5 text-[#0a1628]" />
@@ -116,7 +118,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <nav className="flex-1 space-y-4 overflow-y-auto px-2">
         <div className="space-y-1">
           {!collapsed && (
-            <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-white/40">
+            <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-gold-200/60">
               日常操作
             </div>
           )}
@@ -129,7 +131,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             <>
               {/* 水波纹分隔：渐变细线，像水面波纹 */}
               <div className="mx-3 mb-2 h-px bg-gradient-to-r from-transparent via-lake-400/40 to-transparent" />
-              <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-white/40">
+              <div className="px-3 pb-1 text-[11px] font-medium tracking-wider text-gold-200/60">
                 管理
               </div>
             </>
@@ -141,7 +143,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
       </nav>
 
       {!collapsed && (
-        <div className="px-4 pb-1 text-[11px] text-white/40">v{APP_VERSION} · 阿东 © 2026</div>
+        <div className="px-4 pb-1 text-[11px] text-gold-200/50">v{APP_VERSION} · 阿东 © 2026</div>
       )}
       <button
         onClick={onToggle}
