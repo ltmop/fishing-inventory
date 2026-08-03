@@ -1,7 +1,7 @@
 {
   "name": "fishing-inventory",
   "private": true,
-  "version": "2.0.3",
+  "version": "2.0.4",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -15,6 +15,7 @@
   "description": "渔具库存AI管理系统 — 面向中小渔具店的本地进销存桌面软件",
   "author": "阿杜",
   "dependencies": {
+    "@fontsource/plus-jakarta-sans": "^5.3.0",
     "@radix-ui/react-checkbox": "^1.1.4",
     "@radix-ui/react-dialog": "^1.1.6",
     "@radix-ui/react-label": "^2.1.2",

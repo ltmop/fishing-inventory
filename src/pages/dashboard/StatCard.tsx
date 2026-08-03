@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { motion } from 'motion/react'
 import type { Box } from 'lucide-react'
 
@@ -21,10 +22,15 @@ export interface CardSpec {
   featured?: boolean
 }
 
-/** 仪表盘统计卡：数字滚动动画 + 悬浮上浮 + 可点击跳转 */
+/** 仪表盘统计卡：数字滚动 + 悬浮上浮 + Aceternity 光晕跟随 + 可点击跳转 */
 export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
   const animated = useCountUp(spec.value)
   const Icon = spec.icon
+  const [spot, setSpot] = useState({ x: 0, y: 0 })
+  const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setSpot({ x: e.clientX - rect.left, y: e.clientY - rect.top })
+  }
   return (
     <motion.div
       initial={{ opacity: 0, y: 16 }}
@@ -34,6 +40,7 @@ export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
       className={spec.featured ? 'col-span-2' : ''}
     >
       <Card
+        onMouseMove={handleMove}
         onClick={spec.action}
         onKeyDown={
           spec.action
@@ -47,13 +54,22 @@ export function StatCard({ spec, index }: { spec: CardSpec; index: number }) {
         }
         role={spec.action ? 'button' : undefined}
         tabIndex={spec.action ? 0 : undefined}
-        className={`group h-full border-0 shadow-card transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover ${
+        className={`group relative h-full overflow-hidden border-0 shadow-card transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover ${
           spec.featured ? 'hover:shadow-brand-900/20' : ''
         } ${spec.cardClass} ${
           spec.pulse ? 'animate-pulse' : ''
         } ${spec.action ? 'cursor-pointer focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:outline-none' : ''}`}
       >
-        <CardContent className={spec.featured ? 'flex h-full items-center gap-5 pt-6' : 'pt-6'}>
+        {/* Aceternity 光晕跟随：鼠标滑过时泛起柔和光斑 */}
+        <div
+          className="pointer-events-none absolute inset-0 z-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+          style={{
+            background: `radial-gradient(260px circle at ${spot.x}px ${spot.y}px, ${
+              spec.featured ? 'rgba(255,255,255,0.18)' : 'rgba(201,165,90,0.14)'
+            }, transparent 65%)`,
+          }}
+        />
+        <CardContent className={`relative z-10 ${spec.featured ? 'flex h-full items-center gap-5 pt-6' : 'pt-6'}`}>
           <div className={`inline-flex rounded-full p-2.5 transition-transform duration-200 group-hover:scale-110 ${spec.iconClass} ${spec.featured ? 'mb-0 p-3.5' : 'mb-3'}`}>
             <Icon className={spec.featured ? 'size-7' : 'size-5'} />
           </div>

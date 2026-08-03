@@ -192,7 +192,8 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    /* Horizon UI 的 Plus Jakarta Sans 作西文主字体；中文回退系统字体（该字体不含中文） */
+    font-family: "Plus Jakarta Sans", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
   }
   /* 大字模式：根字号 16px → 18px，全站 rem 字号（含 Tailwind 工具类）整体放大 */
   html.text-large {
