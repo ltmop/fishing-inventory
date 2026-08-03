@@ -206,7 +206,11 @@ interface AppState {
     unitPrice: number | null,
     operator: string,
     credit?: CreditOptions,
-  ) => Promise<{ ok: true; allocations: FifoAllocation[] } | { ok: false; shortage: number }>
+  ) => Promise<
+    | { ok: true; allocations: FifoAllocation[] }
+    | { ok: false; shortage: number }
+    | { ok: false; expired: true; expiredBatches: { batch_no: string; expiry_date: string; quantity: number }[] }
+  >
   /** 一单多商品收银台：多行商品同一事务出库，任一行缺货整单回滚；
    * 收款口径同 confirmOutbound（credit.paidAmount 省略=全额付清，纯赊账 payMethod 不落库） */
   checkout: (

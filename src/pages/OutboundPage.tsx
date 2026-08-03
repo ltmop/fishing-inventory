@@ -300,7 +300,7 @@ export function OutboundPage() {
       let result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', credit)
       setConfirmOpen(false)
       // 过期拦截：默认不卖过期饵料；老板确认要临期/过期处理时二次确认后放行
-      if (!result.ok && result.expired) {
+      if (!result.ok && 'expired' in result && result.expired) {
         const desc = (result.expiredBatches ?? [])
           .map((b: { batch_no: string; expiry_date: string }) => `${b.batch_no}（${b.expiry_date}）`)
           .join('，')
@@ -316,14 +316,20 @@ export function OutboundPage() {
         result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', { ...credit, allowExpired: true })
         if (!result.ok) {
           playSound('error')
-          setError(result.expired ? '仍被拦截，请先处理过期批次' : `库存不足，还差 ${result.shortage} 个`)
+          setError(
+            'expired' in result && result.expired
+              ? '仍被拦截，请先处理过期批次'
+              : 'shortage' in result
+                ? `库存不足，还差 ${result.shortage} 个`
+                : '出库失败',
+          )
           setExecuting(false)
           return
         }
       }
       if (!result.ok) {
         playSound('error')
-        setError(`库存不足，还差 ${result.shortage} 个`)
+        setError('shortage' in result ? `库存不足，还差 ${result.shortage} 个` : '出库失败')
         return
       }
       playSound('success')
@@ -449,7 +455,7 @@ export function OutboundPage() {
       const lines = cart.map((i) => ({ productId: i.product.id, quantity: i.quantity, sellingPrice: i.priceCents }))
       let result = await checkout(lines, operator.trim() || '未署名', credit)
       // 过期拦截（收银台）：单子里有商品含已过期批次 → 确认后放行
-      if (!result.ok && result.expired) {
+      if (!result.ok && 'expired' in result && result.expired) {
         const names = (result.expiredProducts ?? [])
           .map((p: { name: string; expiredBatches: { batch_no: string; expiry_date: string }[] }) => {
             const bs = p.expiredBatches.map((b) => `${b.batch_no}（${b.expiry_date}）`).join('，')
@@ -467,14 +473,24 @@ export function OutboundPage() {
         if (!result.ok) {
           setCheckoutOpen(false)
           playSound('error')
-          setError(result.expired ? '仍被拦截，请先处理过期批次' : `库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`)
+          setError(
+            'expired' in result && result.expired
+              ? '仍被拦截，请先处理过期批次'
+              : 'shortages' in result
+                ? `库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`
+                : '开单失败，请重试',
+          )
           return
         }
       }
       if (!result.ok) {
         setCheckoutOpen(false)
         playSound('error')
-        setError(`库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`)
+        setError(
+          'shortages' in result
+            ? `库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`
+            : '开单失败，请重试',
+        )
         return
       }
       setCheckoutOpen(false)

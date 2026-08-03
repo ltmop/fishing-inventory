@@ -344,7 +344,7 @@ export function AiPanel() {
           patch('failed')
           setMessages((prev) => [
             ...prev,
-            { role: 'assistant', content: `出库没成功：${draft.product_name} 库存不足，还差 ${r.shortage} 件。` },
+            { role: 'assistant', content: `出库没成功：${draft.product_name}${'shortage' in r ? ` 库存不足，还差 ${r.shortage} 件` : r.expired ? ' 含已过期批次' : ''}。` },
           ])
           return
         }
