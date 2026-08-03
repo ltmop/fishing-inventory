@@ -288,9 +288,14 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-800">仪表盘</h1>
-        <p className="mt-1 text-[13px] text-slate-500">门店经营概览，数据实时来自库存与流水</p>
+      {/* 页面横幅：深色渐变 + 金色光晕，一进来就有"高端渔具店"的气场 */}
+      <div className="relative overflow-hidden rounded-2xl border border-slate-200/60 bg-gradient-to-r from-[#0d1b30] via-[#122038] to-[#0a1628] px-6 py-7 shadow-[0_12px_32px_-12px_rgba(0,0,0,0.3)] dark:border-[#1e3049]">
+        <div className="pointer-events-none absolute -right-16 -top-16 size-52 rounded-full bg-gold-500/15 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-10 left-1/3 size-40 rounded-full bg-lake-500/10 blur-3xl" />
+        <div className="relative">
+          <h1 className="text-2xl font-bold text-white">仪表盘</h1>
+          <p className="mt-1.5 text-[13px] text-slate-300">门店经营概览 · 数据实时来自库存与流水</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
