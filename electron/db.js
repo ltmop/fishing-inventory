@@ -228,6 +228,18 @@ CREATE TABLE IF NOT EXISTS expenses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
+
+-- 报损登记（v2.1）：活饵死亡/饵料报废等损耗。报损 = 从批次扣库存 + 记损耗，供成本报表单独统计
+CREATE TABLE IF NOT EXISTS waste_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    batch_id INTEGER REFERENCES inventory_batches(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    reason TEXT NOT NULL DEFAULT '',  -- 报损原因：活饵死亡/饵料临期报废/破损等
+    operator TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_waste_logs_created ON waste_logs(created_at);
 `
 
 /**

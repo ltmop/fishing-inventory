@@ -297,8 +297,30 @@ export function OutboundPage() {
     if (credit && activeTier) credit.tier = activeTier
     setExecuting(true)
     try {
-      const result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', credit)
+      let result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', credit)
       setConfirmOpen(false)
+      // 过期拦截：默认不卖过期饵料；老板确认要临期/过期处理时二次确认后放行
+      if (!result.ok && result.expired) {
+        const desc = (result.expiredBatches ?? [])
+          .map((b: { batch_no: string; expiry_date: string }) => `${b.batch_no}（${b.expiry_date}）`)
+          .join('，')
+        const confirmed = window.confirm(
+          `⚠ 这个商品有已过期批次要出（${desc}）\n\n确认继续出库吗？临期/过期饵料低价处理可继续。`,
+        )
+        if (!confirmed) {
+          playSound('error')
+          setError('已取消：出库被拦截（含已过期批次），可用「报损登记」处理过期货')
+          setExecuting(false)
+          return
+        }
+        result = await confirmOutbound(selected.id, qty, price, operator.trim() || '未署名', { ...credit, allowExpired: true })
+        if (!result.ok) {
+          playSound('error')
+          setError(result.expired ? '仍被拦截，请先处理过期批次' : `库存不足，还差 ${result.shortage} 个`)
+          setExecuting(false)
+          return
+        }
+      }
       if (!result.ok) {
         playSound('error')
         setError(`库存不足，还差 ${result.shortage} 个`)
@@ -425,7 +447,30 @@ export function OutboundPage() {
     setCheckoutExecuting(true)
     try {
       const lines = cart.map((i) => ({ productId: i.product.id, quantity: i.quantity, sellingPrice: i.priceCents }))
-      const result = await checkout(lines, operator.trim() || '未署名', credit)
+      let result = await checkout(lines, operator.trim() || '未署名', credit)
+      // 过期拦截（收银台）：单子里有商品含已过期批次 → 确认后放行
+      if (!result.ok && result.expired) {
+        const names = (result.expiredProducts ?? [])
+          .map((p: { name: string; expiredBatches: { batch_no: string; expiry_date: string }[] }) => {
+            const bs = p.expiredBatches.map((b) => `${b.batch_no}（${b.expiry_date}）`).join('，')
+            return `${p.name}【${bs}】`
+          })
+          .join('；')
+        const confirmed = window.confirm(`⚠ 单子里有商品含已过期批次：\n${names}\n\n确认继续开单吗？临期/过期饵料低价处理可继续。`)
+        if (!confirmed) {
+          setCheckoutOpen(false)
+          playSound('error')
+          setError('已取消：开单被拦截（含已过期批次），可用「报损登记」处理过期货')
+          return
+        }
+        result = await checkout(lines, operator.trim() || '未署名', { ...credit, allowExpired: true })
+        if (!result.ok) {
+          setCheckoutOpen(false)
+          playSound('error')
+          setError(result.expired ? '仍被拦截，请先处理过期批次' : `库存不足：${result.shortages.map((s) => `${s.name} 还差 ${s.shortage} 件`).join('；')}，开单未记账`)
+          return
+        }
+      }
       if (!result.ok) {
         setCheckoutOpen(false)
         playSound('error')

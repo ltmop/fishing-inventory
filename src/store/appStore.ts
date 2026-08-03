@@ -289,6 +289,8 @@ interface AppState {
   addExpense: (input: ExpenseInput) => Promise<Expense>
   updateExpense: (id: number, input: ExpenseInput) => Promise<void>
   deleteExpense: (id: number) => Promise<void>
+  /** 报损登记：活饵死亡/饵料报废从库存扣减，写 waste_logs（列表/汇总走 IPC 直拉，不进 store） */
+  createWaste: (productId: number, quantity: number, reason: string, operator?: string) => Promise<void>
 
   /** 拉取操作日志（audit:list，最近 200 条，可按 action 筛选）；mock 路径本地已有全量，无需拉取 */
   loadAuditLogs: (action?: string) => Promise<void>
@@ -708,6 +710,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         paidAmount: credit?.paidAmount ?? null,
         tier: credit?.tier ?? null,
         payMethod: credit?.payMethod ?? null,
+        allowExpired: credit?.allowExpired,
       })
       if (result.ok) {
         await get().loadAll()
@@ -800,6 +803,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         customerId: credit?.customerId ?? null,
         paidAmount: credit?.paidAmount ?? null,
         payMethod: credit?.payMethod ?? null,
+        allowExpired: credit?.allowExpired,
       })) as CheckoutResult
       if (result.ok) {
         await get().loadAll()
@@ -1511,6 +1515,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s = get()
     if (!s.expenses.some((e) => e.id === id)) throw new Error('支出记录不存在或已被删除')
     set({ expenses: s.expenses.filter((e) => e.id !== id) })
+  },
+
+  createWaste: async (productId, quantity, reason, operator) => {
+    if (backend) {
+      await backend.invoke('waste:create', { productId, quantity, reason, operator })
+      await get().loadAll()
+      return
+    }
+    // 浏览器 mock 路径：报损在本地扣批次库存（仅 dev 用）
+    const s = get()
+    let left = quantity
+    const sorted = s.batches
+      .filter((b) => b.product_id === productId && b.quantity > 0)
+      .sort((a, b) => (a.expiry_date ?? '9999') < (b.expiry_date ?? '9999') ? -1 : 1)
+    for (const b of sorted) {
+      if (left <= 0) break
+      const deduct = Math.min(b.quantity, left)
+      b.quantity -= deduct
+      left -= deduct
+    }
+    set({ batches: [...s.batches] })
   },
 
   customerStatement: async (customerId) => {

@@ -147,6 +147,10 @@ function registerIpc() {
   handle('expense:create', (d, p) => commands.createExpense(d, p))
   handle('expense:update', (d, p) => commands.updateExpense(d, p))
   handle('expense:delete', (d, p) => commands.deleteExpense(d, p))
+  // 报损登记：记损耗 / 列表 / 汇总（活饵死亡、饵料报废进成本报表）
+  handle('waste:create', (d, p) => commands.createWaste(d, p))
+  handle('waste:list', (d, p) => commands.listWastes(d, p ?? {}))
+  handle('waste:summary', (d, p) => commands.wasteSummary(d, p ?? {}))
   // 采购订单：建单/列表/详情/收货入库/取消
   handle('po:create', (d, p) => commands.createPurchaseOrder(d, p))
   handle('po:list', (d, p) => commands.listPurchaseOrders(d, p))

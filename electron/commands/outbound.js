@@ -29,7 +29,7 @@ import {
  * 全额付清记各条流水；部分付款且实收>0 同样记；纯赊账（paidAmount=0）强制记 NULL（没有现金移动）。
  * 老数据/未传的一律 NULL=未记录，日结拆分单独归入"未记录"。
  */
-export function confirmOutbound(db, { productId, quantity, sellingPrice, operator, customerId, paidAmount, tier, payMethod }) {
+export function confirmOutbound(db, { productId, quantity, sellingPrice, operator, customerId, paidAmount, tier, payMethod, allowExpired }) {
   // 入口先校验：数量为 0/负数时直接抛错，不再静默返回 { ok: true, allocations: [] }
   assertPositiveInt(quantity, '出库数量')
   if (sellingPrice != null) assertFen(sellingPrice, '出库售价')
@@ -75,6 +75,16 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
     const total = batches.reduce((s, b) => s + b.quantity, 0)
     if (total < quantity) return { ok: false, shortage: quantity - total }
 
+    // 过期拦截：计划扣减的批次里有已过期的（到期日 < 今天），默认拒绝出库——杜绝卖过期饵料。
+    // 老板确认要低价处理时前端传 allowExpired: true 才放行。
+    const todayStr = now().slice(0, 10)
+    const expiredBatches = batches
+      .filter((b) => b.expiry_date && b.expiry_date < todayStr)
+      .map((b) => ({ batch_no: b.batch_no, expiry_date: b.expiry_date, quantity: b.quantity }))
+    if (expiredBatches.length > 0 && !allowExpired) {
+      return { ok: false, expired: true, expiredBatches, total }
+    }
+
     const ts = now()
     const totalDue = sellingPrice != null ? quantity * sellingPrice : null
     // 是否赊账单（部分付款/纯赊账）：只有赊账单才往 paid_amount 写实收，否则保持 NULL=全额付清
@@ -83,14 +93,9 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
     const methodForTx = isCredit && paidAmount === 0 ? null : payMethod
     let paidLeft = isCredit ? paidAmount : 0
     const allocations = []
-    const expiredBatches = [] // 涉及已过期批次 → 前端提示，不硬拦截（老板可能低价处理）
-    const todayStr = now().slice(0, 10)
     let remaining = quantity
     for (const b of batches) {
       if (remaining <= 0) break
-      if (b.expiry_date && b.expiry_date < todayStr) {
-        expiredBatches.push({ batch_no: b.batch_no, expiry_date: b.expiry_date, quantity: b.quantity })
-      }
       const deduct = Math.min(b.quantity, remaining)
       const after = b.quantity - deduct
       db.prepare('UPDATE inventory_batches SET quantity = ? WHERE id = ?').run(after, b.id)
@@ -136,7 +141,7 @@ export function confirmOutbound(db, { productId, quantity, sellingPrice, operato
  * 返回 { ok, lines:[{productId, quantity, sellingPrice, allocations}], totalDue, paidAmount, creditAmount }
  * 或 { ok:false, shortages:[{productId, name, shortage}] }（哪几个商品不够、各差多少，一次说清）
  */
-export function confirmCheckout(db, { items, customerId, paidAmount, payMethod, operator }) {
+export function confirmCheckout(db, { items, customerId, paidAmount, payMethod, operator, allowExpired }) {
   if (!Array.isArray(items) || items.length === 0) throw new Error('开单商品列表不能为空')
   if (items.length > 50) throw new Error(`一单最多 50 种商品，收到：${items.length}`)
   payMethod = assertPayMethod(payMethod)
@@ -179,9 +184,22 @@ export function confirmCheckout(db, { items, customerId, paidAmount, payMethod, 
       if (total < l.quantity) {
         shortages.push({ productId: l.productId, name: productLabel(prod), shortage: l.quantity - total })
       }
-      planRows.push({ line: l, batches })
+      planRows.push({ line: l, batches, prod })
     }
     if (shortages.length > 0) return { ok: false, shortages }
+    // 过期拦截：单子里有商品计划扣到已过期批次 → 默认拒绝（杜绝卖过期饵料）；老板确认处理时传 allowExpired 放行
+    const todayStr2 = now().slice(0, 10)
+    const expiredProducts = planRows
+      .map(({ line: l, batches, prod }) => {
+        const exps = batches.filter((b) => b.expiry_date && b.expiry_date < todayStr2)
+        return exps.length > 0
+          ? { productId: l.productId, name: productLabel(prod), expiredBatches: exps.map((b) => ({ batch_no: b.batch_no, expiry_date: b.expiry_date, quantity: b.quantity })) }
+          : null
+      })
+      .filter(Boolean)
+    if (expiredProducts.length > 0 && !allowExpired) {
+      return { ok: false, expired: true, expiredProducts }
+    }
     const ts = now()
     const isCredit = paidAmount != null && paidAmount < totalDue
     // 纯赊账没有现金移动，收款方式强制落空；全额/部分收款才记方式
