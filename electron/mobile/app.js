@@ -80,44 +80,58 @@ function prodName(p) { return (p.brand || '') + ' ' + (p.model || '') || p.sku_c
 // ========== 扫码 ==========
 let scanCallback = null
 
+// 扫码：拍照解析条码。用 <input capture> 调起相机拍照，再本地解析——
+// 不依赖 getUserMedia（局域网 HTTP 非安全环境会禁用摄像头扫码），店里 WiFi 下也能用。
 function openScanner(cb, hint) {
   scanCallback = cb
-  if ('BarcodeDetector' in window) {
-    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code'] })
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(stream => {
-      const overlay = document.createElement('div')
-      overlay.id = 'scanner-overlay'
-      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:#000;z-index:200;display:flex;flex-direction:column'
-      overlay.innerHTML = '<button style="position:absolute;top:16px;right:16px;width:40px;height:40px;border-radius:20px;background:rgba(255,255,255,.2);color:#fff;border:none;font-size:20px;cursor:pointer;z-index:10">✕</button><video autoplay playsinline style="flex:1;object-fit:cover"></video><div style="position:absolute;bottom:80px;left:16px;right:16px;display:flex;gap:8px"><input id="scan-manual" placeholder="或手动输入条码" style="flex:1;padding:12px;border-radius:10px;border:none;font-size:16px"><button id="scan-manual-btn" style="padding:12px 18px;border-radius:10px;border:none;background:var(--blue);color:#fff;font-size:14px;cursor:pointer">确认</button></div>'
-      document.body.appendChild(overlay)
-      overlay.querySelector('button').onclick = () => { closeScanner(); stopStream(stream) }
-      document.getElementById('scan-manual-btn').onclick = () => { const v = document.getElementById('scan-manual').value.trim(); if (v && scanCallback) { closeScanner(); stopStream(stream); scanCallback(v) } }
-      overlay.querySelector('video').srcObject = stream
-      overlay.querySelector('video').play()
-      poll(detector, overlay.querySelector('video'), stream)
-    }).catch(() => { const v = prompt('摄像头不可用，请手动输入条码'); if (v && scanCallback) scanCallback(v) })
-  } else {
-    const v = prompt('此浏览器不支持扫码，请手动输入条码'); if (v && scanCallback) scanCallback(v)
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/*'
+  input.capture = 'environment'
+  input.onchange = function () {
+    if (!input.files || !input.files[0]) return
+    const file = input.files[0]
+    const reader = new FileReader()
+    reader.onload = function () {
+      const img = new Image()
+      img.onload = async function () {
+        try {
+          const code = await decodeBarcode(img)
+          if (code && scanCallback) { closeScanner(); scanCallback(code) }
+          else manualFallback('没识别出条码，手动输一下')
+        } catch (e) { manualFallback('识别失败，手动输一下') }
+      }
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
   }
+  input.click()
 }
 
-let pollTimer
-function poll(detector, video, stream) {
-  if (!document.getElementById('scanner-overlay')) { stopStream(stream); return }
-  detector.detect(video).then(barcodes => {
-    if (barcodes.length > 0 && scanCallback) {
-      stopStream(stream); closeScanner(); scanCallback(barcodes[0].rawValue); return
-    }
-    pollTimer = setTimeout(() => poll(detector, video, stream), 200)
-  }).catch(() => { pollTimer = setTimeout(() => poll(detector, video, stream), 500) })
+async function decodeBarcode(img) {
+  // 优先浏览器原生 BarcodeDetector（Chrome 支持，能解析图片）
+  if ('BarcodeDetector' in window) {
+    const detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code'] })
+    const codes = await detector.detect(img)
+    if (codes.length > 0) return codes[0].rawValue
+  }
+  // 兜底：本地 zxing 解析（离线打包，不依赖网络/安全上下文）
+  if (window.ZXing) {
+    const reader = new ZXing.BrowserMultiFormatReader()
+    const result = await reader.decodeFromImageElement(img)
+    return result ? result.getText() : null
+  }
+  throw new Error('no decoder')
+}
+
+function manualFallback(hint) {
+  const v = prompt(hint || '请输入条码')
+  if (v && scanCallback) { closeScanner(); scanCallback(v) }
 }
 
 function closeScanner() {
-  const el = document.getElementById('scanner-overlay'); if (el) { el.remove(); scanCallback = null }
-  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+  scanCallback = null
 }
-
-function stopStream(stream) { stream.getTracks().forEach(t => t.stop()) }
 
 // ========== 页面注册 ==========
 const pages = {}
