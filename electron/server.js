@@ -1076,7 +1076,9 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     try {
       const data = fs.readFileSync(abs)
       const mime = STATIC_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream'
-      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': mime, 'Cache-Control': 'no-cache' })
+      // 手机端必须能加载本地 JS（app.js / pages / zxing），用 APP_CSP 而非默认 SECURITY_HEADERS——
+      // 默认 CSP 的 script-src 'unsafe-inline' 会拦截所有 <script src>，导致手机端功能全空白
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Security-Policy': APP_CSP, 'Content-Type': mime, 'Cache-Control': 'no-cache' })
       res.end(data)
     } catch { sendJson(res, 404, { error: 'not found' }) }
   }
