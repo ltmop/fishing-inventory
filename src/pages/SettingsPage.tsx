@@ -158,8 +158,11 @@ export function SettingsPage() {
       QRCode.toDataURL(s.url, { width: 220, margin: 1 })
         .then(setQrDataUrl)
         .catch(() => setQrDataUrl(''))
-      // 手机开店 /m/ 二维码（全功能操作端）
-      const mUrl = s.url.replace(/\/$/, '') + '/m/'
+      // 手机开店 /m/ 二维码（全功能操作端）：必须带上访问 token，否则扫码提示要密码
+      // s.url 形如 http://ip:port/?token=xxx → mUrl 应为 http://ip:port/m/?token=xxx
+      const base = s.url.split('?')[0].replace(/\/$/, '')
+      const query = s.url.includes('?') ? '?' + s.url.split('?')[1] : ''
+      const mUrl = base + '/m/' + query
       QRCode.toDataURL(mUrl, { width: 220, margin: 1 })
         .then(setPosQrDataUrl)
         .catch(() => setPosQrDataUrl(''))
