@@ -1,6 +1,16 @@
 // app.js: 手机端框架 —— 路由 / fetch / token / 组件 / 印章动画 / toast
 // 视觉：阿东渔具 · 纸质感 · 贴纸收款键 · 印章反馈
 
+// 诊断：任何 JS 报错显示到页面，方便定位问题（修好后可保留，不干扰正常使用）
+window.addEventListener('error', function (e) {
+  try {
+    var app = document.getElementById('app')
+    if (app && app.innerHTML.indexOf('JS错误') < 0) {
+      app.innerHTML = '<div style="padding:20px;color:#ff6b6b;font-size:13px">JS错误: ' + (e.message || '未知') + '</div>'
+    }
+  } catch (err) { /* 忽略 */ }
+})
+
 // token 持久化：优先从 URL 拿（扫码打开时带 token），其次从 localStorage 取（上次记住的），
 // 都没有才提示重新扫码。首次扫码打开时自动记住，之后关闭页面/加到主屏幕都能直接重开。
 const TOKEN = (() => {
@@ -157,4 +167,6 @@ page('more', (app) => {
   app.appendChild(note)
 })
 
-renderPage()
+// 注意：不能在文件末尾直接调 renderPage()——此时 pages/*.js 还没加载，
+// pages 是空的，会把首页渲染成"页面未找到"且锁死 currentPage。
+// 首页渲染交给 DOMContentLoaded（此时所有脚本已执行完）。
