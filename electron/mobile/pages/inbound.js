@@ -42,6 +42,7 @@ page('inbound', function (app) {
         '<div class="fld"><label>进价（元）</label><input id="f-cost" type="number" step="0.01" placeholder="0.00"></div>' +
       '</div>' +
       '<div class="fld"><label>数量</label><input id="f-qty" type="number" placeholder="大概多少个？"><div class="tip">大概还有多少个？不准没关系，以后盘点会校正</div></div>' +
+      '<div class="fld"><label>到期日（可选，饵料/小药/活饵填）</label><input id="f-expiry" type="date" placeholder="2026-12-31"></div>' +
       '<button class="okbtn" id="f-ok">完成入库</button>'
     app.appendChild(form)
 
@@ -77,7 +78,15 @@ page('inbound', function (app) {
       const qty = parseInt(prompt('「' + name + '」\n库存 ' + (p.total_stock || 0) + '，入多少个？', '1')) || 1
       if (qty <= 0) return
       const cost = prompt('进价多少元？', String((p.cost_price || 0) / 100))
-      await api('inbound:create', { product_id: p.id, quantity: qty, cost_price: cost ? Math.round(parseFloat(cost) * 100) : p.cost_price, location: p.location || '', operator: '手机' })
+      // 到期日（可选，饵料/小药/活饵填）：格式 YYYY-MM-DD，如 2026-08-31
+      const expiry = prompt('到期日（可选，饵料/小药/活饵填）\n格式：2026-12-31\n不填回车跳过', '')
+      const payload = {
+        product_id: p.id, quantity: qty,
+        cost_price: cost ? Math.round(parseFloat(cost) * 100) : p.cost_price,
+        location: p.location || '', operator: '手机',
+      }
+      if (expiry && /^\d{4}-\d{2}-\d{2}$/.test(expiry.trim())) payload.expiryDate = expiry.trim()
+      await api('inbound:create', payload)
       showStamp('已入库', name + ' × ' + qty, true)
       loadRecents()
     } catch (e) { toast('入库失败: ' + e.message) }
@@ -140,12 +149,14 @@ page('inbound', function (app) {
     if (qty <= 0) { toast('填个数量'); return }
     const cost = costStr ? Math.round(parseFloat(costStr) * 100) : 0
     const code = form.getAttribute('data-code') || ''
+    const expiryEl = document.getElementById('f-expiry')
+    const expiry = expiryEl && expiryEl.value ? expiryEl.value : undefined
     try {
       const r = await api('product:create', {
         sku_code: code, barcode: code, category: cat, brand: '', model: name,
-        cost_price: cost, suggest_price: Math.round(cost * 1.5), status: '待盘点',
+        cost_price: cost, suggest_price: 0, status: '待盘点',
       })
-      await api('inbound:create', { product_id: r.id, quantity: qty, cost_price: cost, location: '', operator: '手机' })
+      await api('inbound:create', { product_id: r.id, quantity: qty, cost_price: cost, location: '', operator: '手机', expiryDate: expiry })
       showStamp('已入库', name + ' × ' + qty, true)
       form.classList.remove('show')
       document.getElementById('ai-tag').classList.remove('show')

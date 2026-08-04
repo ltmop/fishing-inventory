@@ -2,14 +2,21 @@
 page('today', function (app) {
   let data = null
 
+  let loaded = false
   async function load() {
     try { data = await api('report:today') } catch { data = null }
+    loaded = true
     render()
   }
 
   function render() {
     app.innerHTML = ''
-    if (!data || data.revenue === undefined) { app.innerHTML = '<div class="text-center text-muted" style="padding:40px">加载中...</div>'; load(); return }
+    // 只在首次加载前显示加载中；加载失败显示错误且不重刷（防止空数据把服务器刷瘫）
+    if (!loaded) { app.innerHTML = '<div class="text-center text-muted" style="padding:40px">加载中...</div>'; return }
+    if (!data || data.revenue === undefined) {
+      app.innerHTML = '<div class="text-center" style="padding:40px"><div class="text-sm" style="color:var(--red)">今日数据加载失败，稍后重试</div></div>'
+      return
+    }
 
     const rev = data.revenue || 0, prof = data.profit || 0
     const expense = data.expense || 0

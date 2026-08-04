@@ -1,11 +1,14 @@
 // restock.js: 补货清单
 page('restock', function (app) {
   let items = []
-  async function load() { try { items = await api('report:lowStock') } catch { items = [] }; render() }
+  let loaded = false
+  async function load() { try { items = await api('report:lowStock') } catch { items = [] }; loaded = true; render() }
   function render() {
     app.innerHTML = '<div class="sectitle"><span class="tag">⚠️ 补货清单</span></div>'
+    // 空数据是正常情况（库存健康），不重刷，防止把服务器刷瘫
+    if (!loaded) return
     if (items.length === 0) {
-      const e = document.createElement('div'); e.className = 'text-center text-muted'; e.style.padding = '40px'; e.textContent = '库存健康，无需补货'; app.appendChild(e); load(); return
+      const e = document.createElement('div'); e.className = 'text-center text-muted'; e.style.padding = '40px'; e.textContent = '库存健康，无需补货'; app.appendChild(e); return
     }
     items.forEach(p => {
       const card = document.createElement('div'); card.className = 'card'

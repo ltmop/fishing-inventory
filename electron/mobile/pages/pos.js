@@ -119,16 +119,20 @@ page('pos', function (app) {
   async function createOnTheFly(code) {
     const name = prompt('这个商品叫什么名字？（选填）', code)
     if (!name) return null
+    // 进价必须填真实的，不能瞎猜——否则毛利报表全是错的
+    const costStr = prompt('进价多少元？（毛利就靠它算，别乱填）', '')
+    if (!costStr || !(parseFloat(costStr) > 0)) { toast('得填个真实进价，毛利才算得准'); return null }
+    const cost = Math.round(parseFloat(costStr) * 100)
     const priceStr = prompt('卖多少钱？（元）例如 85', '')
     const price = priceStr ? Math.round(parseFloat(priceStr) * 100) : 0
     try {
       const r = await api('product:create', {
         sku_code: code, barcode: code, category: '其他', brand: '', model: name,
-        cost_price: Math.round(price * 0.6), suggest_price: price, status: '待盘点',
+        cost_price: cost, suggest_price: price, status: '待盘点',
       })
       const qty = parseInt(prompt('大概多少个？不准没关系，以后盘点会校正', '1')) || 1
-      await api('inbound:create', { product_id: r.id, quantity: qty, cost_price: Math.round(price * 0.6), location: '', operator: '手机' })
-      return { id: r.id, sku_code: code, brand: '', model: name, suggest_price: price, cost_price: Math.round(price * 0.6) }
+      await api('inbound:create', { product_id: r.id, quantity: qty, cost_price: cost, location: '', operator: '手机' })
+      return { id: r.id, sku_code: code, brand: '', model: name, suggest_price: price, cost_price: cost }
     } catch (e) { toast('新建失败: ' + e.message); return null }
   }
 
@@ -150,20 +154,62 @@ page('pos', function (app) {
     if (cart.length === 0 || busy) return
     try {
       const list = await api('customer:list')
-      const name = prompt('赊给谁？（输入客户名）')
-      if (!name) return
-      const customer = list.find(c => c.name === name)
-      if (!customer) { toast('没找到客户「' + name + '」，先在电脑上建客户'); return }
-      busy = true; render()
-      const totalFen = cart.reduce((s, c) => s + c.selling_price * c.qty, 0)
-      await api('outbound:checkout', {
-        items: cart.map(c => ({ product_id: c.product_id, quantity: c.qty, selling_price: c.selling_price })),
-        method: '微信', operator: '手机',
-        customer_id: customer.id, paid_amount: 0,
+      openCustomerPanel(list, async (customer) => {
+        busy = true; render()
+        const totalFen = cart.reduce((s, c) => s + c.selling_price * c.qty, 0)
+        try {
+          await api('outbound:checkout', {
+            items: cart.map(c => ({ product_id: c.product_id, quantity: c.qty, selling_price: c.selling_price })),
+            method: '微信', operator: '手机',
+            customer_id: customer.id, paid_amount: 0,
+          })
+          showStamp('已赊', fmt(totalFen) + ' · ' + customer.name, false)
+          cart.length = 0
+        } catch (e) { toast('赊账失败: ' + e.message) }
+        finally { busy = false; render() }
       })
-      showStamp('已赊', fmt(totalFen) + ' · ' + name, false)
-      cart.length = 0
-    } catch (e) { toast('赊账失败: ' + e.message) } finally { busy = false; render() }
+    } catch (e) { toast('加载客户失败: ' + e.message) }
+  }
+
+  // 客户选择面板：点选老客户，或新建客户（不用手打字找）
+  function openCustomerPanel(list, onSelect) {
+    const overlay = document.createElement('div')
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(10,22,40,.95);z-index:300;display:flex;flex-direction:column;padding:20px;color:#e6edf5'
+    overlay.innerHTML =
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">' +
+        '<div style="font-size:20px;font-weight:700">赊给谁？</div>' +
+        '<button id="cust-close" style="width:40px;height:40px;border-radius:20px;background:rgba(255,255,255,.12);color:#fff;border:none;font-size:20px">✕</button>' +
+      '</div>' +
+      '<div id="cust-list" style="flex:1;overflow:auto"></div>' +
+      '<button id="cust-new" style="height:56px;border-radius:14px;border:none;background:linear-gradient(135deg,#c9a55a,#d4af37);color:#0a1628;font-size:18px;font-weight:800;margin-top:10px">➕ 新建客户</button>'
+    document.body.appendChild(overlay)
+    document.getElementById('cust-close').onclick = () => overlay.remove()
+    const listBox = document.getElementById('cust-list')
+    if (list.length > 0) {
+      listBox.innerHTML = list.map(c =>
+        '<div data-cust="' + c.id + '" style="padding:14px 16px;border-radius:10px;background:rgba(255,255,255,.08);margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">' +
+          '<div style="font-size:18px;font-weight:700">' + c.name + '</div>' +
+          (c.outstanding > 0 ? '<div style="color:#ff6b6b;font-weight:700">欠 ' + fmt(c.outstanding) + '</div>' : '<div style="color:#4ade80">无欠款</div>') +
+        '</div>'
+      ).join('')
+      listBox.querySelectorAll('[data-cust]').forEach(el => {
+        el.onclick = () => {
+          const c = list.find(x => x.id === Number(el.getAttribute('data-cust')))
+          if (c) { overlay.remove(); onSelect(c) }
+        }
+      })
+    } else {
+      listBox.innerHTML = '<div style="padding:10px;color:#8fa3c0">还没有客户，点下面新建</div>'
+    }
+    document.getElementById('cust-new').onclick = async () => {
+      const name = prompt('新客户名字？')
+      if (!name) return
+      try {
+        const r = await api('customer:create', { name, phone: '', notes: '' })
+        overlay.remove()
+        onSelect({ id: r.id, name })
+      } catch (e) { toast('建客户失败: ' + e.message) }
+    }
   }
 
   render()

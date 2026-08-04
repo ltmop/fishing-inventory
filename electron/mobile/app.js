@@ -24,14 +24,27 @@ const TOKEN = (() => {
 const SERVER = ''
 const COLORS = ["#0e9f6e","#b7791f","#1677ff","#7c3aed","#d64545","#0e7490","#be185d","#3f6212","#9a3412"]
 
+// 防请求风暴：token 失效(401)或断网后全局标记，后续请求直接失败不再刷服务器
+let tokenFailed = false
 async function api(channel, payload) {
+  if (tokenFailed) throw new Error('连接已失效，请回设置页重新扫码')
   if (!TOKEN) throw new Error('未连接电脑，请回到设置页扫码进入手机端')
-  const r = await fetch(SERVER + '/api/invoke?token=' + TOKEN, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel, payload: payload || {} }),
-  })
+  let r
+  try {
+    r = await fetch(SERVER + '/api/invoke?token=' + TOKEN, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel, payload: payload || {} }),
+    })
+  } catch (e) {
+    // 断网/网络错误：标记一次，避免页面疯狂重试把服务器或手机拖垮
+    tokenFailed = true
+    throw new Error('连不上电脑，检查店里 WiFi 是否正常')
+  }
   const data = await r.json()
-  if (!r.ok) throw new Error(data.error || '请求失败')
+  if (!r.ok) {
+    if (r.status === 401) tokenFailed = true // token 失效，停止所有后续请求
+    throw new Error(data.error || '请求失败')
+  }
   return data.result
 }
 

@@ -1,6 +1,7 @@
 // stocktake.js: 渐进式盘点
 page('stocktake', function (app) {
   let locations = [], currentLoc = '', products = [], counts = {}, busy = false
+  let loaded = false
 
   async function load() {
     try {
@@ -13,6 +14,7 @@ page('stocktake', function (app) {
         return aMax - bMax
       })
     } catch { locations = [] }
+    loaded = true
     render()
   }
 
@@ -20,7 +22,9 @@ page('stocktake', function (app) {
     app.innerHTML = ''
     app.innerHTML += '<div class="sectitle"><span class="tag">📋 核对货架</span><span>每天核对一小片</span></div>'
     if (currentLoc) { renderStocktake(); return }
-    if (!locations.length) { app.innerHTML += '<div class="text-center text-muted" style="padding:30px">没有可盘点的区域</div>'; load(); return }
+    // 没有盘点区域是正常情况（商品没货位），不重刷
+    if (!loaded) return
+    if (!locations.length) { app.innerHTML += '<div class="text-center text-muted" style="padding:30px">没有可盘点的区域</div>'; return }
     const nextLoc = locations[0]
     const card = document.createElement('div'); card.className = 'card text-center'
     card.innerHTML =

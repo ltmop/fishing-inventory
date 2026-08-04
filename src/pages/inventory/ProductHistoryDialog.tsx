@@ -29,6 +29,7 @@ const TYPE_META: Record<TransactionType, { label: string; badge: string; sign: '
   return: { label: '退货', badge: 'bg-green-100 text-green-700', sign: '+' },
   // 换货退差价流水不动库存（只记钱），数量不带正负号
   exchange: { label: '换货', badge: 'bg-slate-100 text-slate-600', sign: '' },
+  waste: { label: '报损', badge: 'bg-red-100 text-red-700', sign: '-' },
 }
 
 interface ProductHistoryDialogProps {

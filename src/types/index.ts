@@ -65,6 +65,10 @@ export const PRODUCT_STATUSES: ProductStatus[] = [
   '停产',
 ]
 
+// 计量单位（v2.2）：件=按个/按包整数卖（默认）；米=鱼线等按长度小数卖（如 3.5 米）
+export type Unit = '件' | '米'
+export const UNITS: Unit[] = ['件', '米']
+
 export interface Product {
   id: number
   sku_code: string
@@ -88,6 +92,8 @@ export interface Product {
   expiry_date: string | null
   /** 最低库存预警线：NULL=用默认阈值 5；设了按各自阈值预警（COALESCE(min_stock, 5)） */
   min_stock: number | null
+  /** 计量单位（v2.2）：件=整数按个卖（默认）；米=鱼线按长度小数卖 */
+  unit?: '件' | '米' | null
   status: ProductStatus
   created_at: string
   updated_at: string
@@ -108,7 +114,7 @@ export interface InventoryBatch {
   created_at?: string
 }
 
-export type TransactionType = 'in' | 'out' | 'return' | 'exchange'
+export type TransactionType = 'in' | 'out' | 'return' | 'exchange' | 'waste'
 
 export interface Transaction {
   id: number
@@ -135,6 +141,8 @@ export interface Customer {
   notes: string | null
   /** 默认价格档：NULL=零售默认；设了之后出库选他会自动按这档出价 */
   price_level: PriceLevel | null
+  /** 老钓友偏好（v2.2）：自由文本，如"爱用红虫/常买3.6m竿/月底结账" */
+  preferences?: string | null
   created_at: string
 }
 
@@ -414,4 +422,43 @@ export interface BackupStatus {
   extraError: string | null // 最近一次向第二位置复制的失败信息
   dbPath: string
   stale: boolean
+}
+
+// ---------- 套装（v2.2）：一套多个商品，卖一套一键加清单 ----------
+
+export interface Kit {
+  id: number
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+export interface KitItem {
+  id: number
+  kit_id: number
+  product_id: number
+  quantity: number
+}
+
+/** 套装表单输入（kit:save 接收） */
+export interface KitInput {
+  id?: number
+  name: string
+  items: { productId: number; quantity: number }[]
+}
+
+/** 套装列表行（kit:list 返回）：带商品明细条数 */
+export interface KitListItem extends Kit {
+  item_count: number
+}
+
+/** 套装详情（kit:get 返回）：带每个商品的名称/SKU/售价，方便开单时加清单 */
+export interface KitDetailItem {
+  product_id: number
+  quantity: number
+  sku_code: string
+  brand: string | null
+  model: string | null
+  product_name: string
+  suggest_price: number | null
 }
