@@ -992,8 +992,15 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
       const receivable = d.prepare(
         `SELECT COALESCE(SUM(owed - paid),0) FROM (SELECT c.id, COALESCE((SELECT SUM(selling_price*quantity) FROM transactions WHERE customer_id=c.id),0) AS owed, COALESCE((SELECT SUM(paid_amount) FROM transactions WHERE customer_id=c.id),0) AS paid FROM customers c)`
       ).get()
+      // 今日支出（expenses 按 expense_date 记）→ 净利 = 毛利 - 支出
+      const expense = d.prepare(
+        `SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date = date('now','localtime')`
+      ).get()
+      const profitVal = Object.values(profit)[0]
       return {
-        revenue: Object.values(rev)[0], profit: Object.values(profit)[0],
+        revenue: Object.values(rev)[0], profit: profitVal,
+        expense: Object.values(expense)[0],
+        netProfit: profitVal - Object.values(expense)[0],
         paySplit, recent, receivable: Object.values(receivable)[0],
       }
     },

@@ -150,8 +150,10 @@ function page(name, fn) { pages[name] = fn }
 page('more', (app) => {
   app.innerHTML = ''
   const items = [
+    ['💰 今日盈利', '营业额/毛利/净利，今天赚了多少', () => navigate('today')],
     ['⚠️ 补货清单', '低库存 + 补货建议', () => navigate('restock')],
     ['👤 客户欠款', '赊账查询与收款', () => navigate('customers')],
+    ['💸 支出记账', '记一笔房租/水电/进货', () => navigate('expenses')],
     ['🏭 供应商', '进货对账', () => navigate('suppliers')],
     ['📋 核对货架', '每天核对一片区域', () => navigate('stocktake')],
   ]
@@ -163,7 +165,7 @@ page('more', (app) => {
   })
   const note = document.createElement('div')
   note.className = 'text-center text-sm text-muted'; note.style.padding = '20px'
-  note.textContent = '更多功能请在电脑上操作'
+  note.textContent = '采购订货、经营报表、批量导入、设置请在电脑上操作'
   app.appendChild(note)
 })
 

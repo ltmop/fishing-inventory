@@ -12,16 +12,22 @@ page('today', function (app) {
     if (!data || data.revenue === undefined) { app.innerHTML = '<div class="text-center text-muted" style="padding:40px">加载中...</div>'; load(); return }
 
     const rev = data.revenue || 0, prof = data.profit || 0
+    const expense = data.expense || 0
+    const net = data.netProfit !== undefined ? data.netProfit : prof - expense
     const margin = rev > 0 ? (prof / rev * 100).toFixed(1) : '-'
     const split = data.paySplit || {}, recv = data.receivable || 0
     const methods = Object.entries(split.byMethod || {}).filter(([, v]) => v > 0)
 
-    // 三件套卡片
+    // 三件套卡片：营业额 / 毛利 / 净利(盈利)
     const c1 = document.createElement('div'); c1.className = 'card'
     c1.innerHTML =
       '<div class="split">' +
         '<div><div class="text-sm" style="color:var(--sub)">营业额</div><div class="text-2xl font-bolder" style="color:var(--blue)">' + fmt(rev) + '</div></div>' +
         '<div class="text-right"><div class="text-sm" style="color:var(--sub)">毛利</div><div class="text-2xl font-bolder" style="color:var(--green)">' + fmt(prof) + '</div></div>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)">' +
+        '<div><div class="text-sm" style="color:var(--sub)">今日支出</div><div class="text-lg font-bolder" style="color:var(--sand-500,var(--gold))">' + fmt(expense) + '</div></div>' +
+        '<div class="text-right"><div class="text-sm" style="color:var(--sub)">盈利(净利)</div><div class="text-2xl font-bolder" style="color:' + (net >= 0 ? 'var(--green)' : 'var(--red)') + '">' + fmt(net) + '</div></div>' +
       '</div>' +
       '<div class="text-xs text-muted mt-sm">毛利率 ' + margin + '% · 应收 ' + fmt(recv) + '</div>'
     app.appendChild(c1)
