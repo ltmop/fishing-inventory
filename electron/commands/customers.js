@@ -19,6 +19,7 @@ import {
   logAudit,
   outstandingOf,
 } from './helpers.js'
+import { assertOwnerAction } from './users.js'
 
 /** 新建客户：姓名去空白后非空；同名客户拒绝建档（老板容易重复建）；price_level 可空（NULL=零售默认） */
 export function createCustomer(db, { name, phone, notes, price_level, preferences }) {
@@ -63,6 +64,7 @@ export function updateCustomer(db, { id, name, phone, notes, price_level, prefer
 
 /** 删除客户：有流水或还款记录的拒绝删除（删了赊账历史就对不上账了） */
 export function deleteCustomer(db, { id }) {
+  assertOwnerAction(db, '删除客户')
   return inTransaction(db, () => {
     const cur = db.prepare('SELECT id FROM customers WHERE id = ?').get(id)
     if (!cur) return { ok: false, reason: '客户不存在' }

@@ -1,5 +1,6 @@
-// 供应商 CRUD 与对账
-import { inTransaction } from './helpers.js'
+// 供应商 CRUD 与对账 + 付款登记（v0.1）
+import { inTransaction, logAudit, today } from './helpers.js'
+import { assertOwnerAction } from './users.js'
 
 export function createSupplier(db, s) {
   const info = db
@@ -15,11 +16,41 @@ export function updateSupplier(db, id, s) {
 }
 
 export function deleteSupplier(db, id) {
+  assertOwnerAction(db, '删除供应商')
   return inTransaction(db, () => {
     // 批次的外键置空而不是删除批次，保留入库历史
     db.prepare('UPDATE inventory_batches SET supplier_id = NULL WHERE supplier_id = ?').run(id)
     db.prepare('DELETE FROM suppliers WHERE id = ?').run(id)
   })
+}
+
+/**
+ * 登记一次给供应商的付款（v0.1）：金额（分）>0，记方式/备注/日期/经手人。
+ * 付款本身不进库存流水，只冲减"进货应付"；对账单按 累计进货 - 累计已付 = 还欠 计算。
+ */
+export function paySupplier(db, { supplierId, amount, method = '现金', note = null, payDate, operator = null }) {
+  const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(supplierId)
+  if (!supplier) throw new Error('供应商不存在')
+  const amt = Math.round(Number(amount))
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error('付款金额要大于 0')
+  const date = payDate ?? today() // 门店本地日期（UTC+8），不是 UTC
+  return inTransaction(db, () => {
+    const info = db
+      .prepare(
+        `INSERT INTO supplier_payments (supplier_id, amount, method, note, pay_date, operator)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(supplierId, amt, method, note ?? '', date, operator)
+    logAudit(db, '付供应商款', supplier.name, { amount: amt, method, date }, operator)
+    return db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(info.lastInsertRowid)
+  })
+}
+
+/** 某供应商的付款记录列表（新→旧） */
+export function supplierPayments(db, { supplierId }) {
+  return db
+    .prepare('SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY pay_date DESC, id DESC')
+    .all(supplierId)
 }
 
 /**
@@ -29,6 +60,7 @@ export function deleteSupplier(db, id) {
  *   采购收货的流水 notes 形如"采购收货 PO20260728-001"，从中提取关联采购单号。
  * - 汇总：总进货金额/总件数/最近一次进货时间/待收采购单金额
  *   （待收=状态 sent/partial 的采购单里 Σ(订-已收)×进价，单位分）。
+ * - 付款（v0.1）：totalPaid=累计已付，outstanding=累计进货-已付（还欠；负=多付/预付）。
  */
 export function supplierStatement(db, { supplierId }) {
   const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(supplierId)
@@ -69,12 +101,21 @@ export function supplierStatement(db, { supplierId }) {
        WHERE po.supplier_id = ? AND po.status IN ('sent', 'partial')`,
     )
     .get(supplierId).amount
+  const paid = db
+    .prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM supplier_payments WHERE supplier_id = ?')
+    .get(supplierId).total
+  const totalAmount = lines.reduce((s, l) => s + l.amount, 0)
   return {
     supplier,
     lines,
-    totalAmount: lines.reduce((s, l) => s + l.amount, 0),
+    totalAmount,
     totalQty: lines.reduce((s, l) => s + l.quantity, 0),
     lastInboundAt: lines.length > 0 ? lines[lines.length - 1].date : null,
     pendingPoAmount: pending,
+    totalPaid: paid,
+    outstanding: totalAmount - paid,
+    payments: db
+      .prepare('SELECT * FROM supplier_payments WHERE supplier_id = ? ORDER BY pay_date DESC, id DESC')
+      .all(supplierId),
   }
 }

@@ -369,6 +369,24 @@ export interface StockTakeItem {
   reason: string
 }
 
+// ---------- 员工账号（v0.1） ----------
+
+export type UserRole = 'owner' | 'staff'
+
+export interface User {
+  id: number
+  name: string
+  username: string
+  role: UserRole
+  active: number
+  created_at?: string
+}
+
+export const USER_ROLE_LABELS: Record<UserRole, string> = {
+  owner: '老板',
+  staff: '店员',
+}
+
 // ---------- 过期预警 / 操作日志 / 供应商对账 / 备份状态 ----------
 
 /** 临期/过期商品（product:expiring 返回）：daysLeft 为负即已过期 */
@@ -407,6 +425,18 @@ export interface SupplierStatementLine {
   po_no: string | null // 关联采购单号（采购收货入库的才有）
 }
 
+/** 供应商付款记录（supplier:pay / supplier:payments 返回，v0.1） */
+export interface SupplierPayment {
+  id: number
+  supplier_id: number
+  amount: number // 单位：分
+  method: string
+  note: string | null
+  pay_date: string // YYYY-MM-DD
+  operator: string | null
+  created_at?: string
+}
+
 /** 供应商对账单（supplier:statement 返回） */
 export interface SupplierStatement {
   supplier: Supplier
@@ -415,6 +445,9 @@ export interface SupplierStatement {
   totalQty: number // 总进货件数
   lastInboundAt: string | null // 最近一次进货日期
   pendingPoAmount: number // 待收采购单金额（sent/partial 的未收部分），单位：分
+  totalPaid: number // 累计已付款（v0.1），单位：分
+  outstanding: number // 还欠 = 总进货 - 已付（负=多付/预付），单位：分
+  payments: SupplierPayment[] // 付款记录（新→旧）
 }
 
 /** 备份状态（backup:status 返回）：stale=true 表示超过 3 天没备份，前端提醒 */

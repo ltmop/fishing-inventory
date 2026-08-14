@@ -68,6 +68,29 @@ CREATE TABLE IF NOT EXISTS inventory_batches (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 供应商付款登记（v0.1）：进货应付账闭环——付了多少、还欠多少
+CREATE TABLE IF NOT EXISTS supplier_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    method TEXT NOT NULL DEFAULT '现金',
+    note TEXT,
+    pay_date DATE NOT NULL,
+    operator TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 员工账号（v0.1）：本地多用户登录；role=owner 老板 / staff 店员；默认关闭（不打扰单机使用）
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('owner', 'staff')),
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- 赊账包：客户档案（余额模型——"老王一共欠我多少钱"，不绑定单张订单）
 CREATE TABLE IF NOT EXISTS customers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

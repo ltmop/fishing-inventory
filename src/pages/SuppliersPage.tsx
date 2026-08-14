@@ -19,6 +19,7 @@ export function SuppliersPage() {
   const updateSupplier = useAppStore((s) => s.updateSupplier)
   const deleteSupplier = useAppStore((s) => s.deleteSupplier)
   const supplierStatement = useAppStore((s) => s.supplierStatement)
+  const paySupplier = useAppStore((s) => s.paySupplier)
 
   // 供应商对账单弹窗
   const [stmtFor, setStmtFor] = useState<Supplier | null>(null)
@@ -36,6 +37,24 @@ export function SuppliersPage() {
         setPageError(`对账单加载失败：${e instanceof Error ? e.message : String(e)}`)
       })
       .finally(() => setStmtLoading(false))
+  }
+
+  // 登记付款（v0.1）：落库后刷新对账单，让"已付/还欠"即时变化
+  const handlePay = async (supplierId: number, input: { amount: number; method: string; note: string | null; payDate?: string }) => {
+    const supplier = suppliers.find((x) => x.id === supplierId)
+    await paySupplier({ supplierId, ...input })
+    setSuccess(`已登记付给「${supplier?.name ?? ''}」${(input.amount / 100).toFixed(2)} 元`)
+    // 弹窗还开着的话刷新数据
+    if (stmtFor?.id === supplierId) {
+      setStmtLoading(true)
+      try {
+        setStmt(await supplierStatement(supplierId))
+      } catch (e) {
+        setPageError(`对账单刷新失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setStmtLoading(false)
+      }
+    }
   }
 
   const [formOpen, setFormOpen] = useState(false)
@@ -183,12 +202,13 @@ export function SuppliersPage() {
         onCancel={() => setDeleting(null)}
       />
 
-      {/* 供应商对账单 Dialog：汇总头 + 进货明细（样式参照客户对账单） */}
+      {/* 供应商对账单 Dialog：汇总头（含已付/还欠）+ 进货明细 + 付款登记（样式参照客户对账单） */}
       <SupplierStatementDialog
         stmtFor={stmtFor}
         stmt={stmt}
         loading={stmtLoading}
         onClose={() => setStmtFor(null)}
+        onPay={handlePay}
       />
     </div>
   )

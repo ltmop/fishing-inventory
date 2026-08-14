@@ -12,6 +12,7 @@ import {
   PRODUCT_STATUSES,
 } from './helpers.js'
 import { enforceSkuQuota } from '../license.js'
+import { assertOwnerAction } from './users.js'
 
 export function createProduct(db, input) {
   const ts = now()
@@ -95,6 +96,7 @@ export function updateProduct(db, id, input) {
 
 /** 仅允许删除没有任何批次和流水的商品，防止库存历史断链 */
 export function deleteProduct(db, id, operator = null) {
+  assertOwnerAction(db, '删除商品')
   const exists = db.prepare('SELECT 1 FROM products WHERE id = ?').get(id)
   if (!exists) return { ok: false, reason: '商品不存在或已被删除' }
   const batchCount = db.prepare('SELECT COUNT(*) AS n FROM inventory_batches WHERE product_id = ?').get(id).n

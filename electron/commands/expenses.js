@@ -10,6 +10,7 @@ import {
   now,
   logAudit,
 } from './helpers.js'
+import { assertOwnerAction } from './users.js'
 
 // 支出分类白名单（个体户常见科目，杂项兜底）
 export const EXPENSE_CATEGORIES = ['进货付款', '房租', '水电', '运费', '人工', '杂项']
@@ -74,6 +75,7 @@ export function updateExpense(db, input) {
 
 /** 删支出：账目可删（不像客户有引用完整性问题），留审计日志 */
 export function deleteExpense(db, { id, operator }) {
+  assertOwnerAction(db, '删除支出')
   const old = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
   if (!old) throw new Error('支出记录不存在或已被删除')
   return inTransaction(db, () => {

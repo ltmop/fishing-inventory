@@ -27,8 +27,11 @@ import type {
   StockTake,
   StockTakeItem,
   Supplier,
+  SupplierPayment,
   SupplierStatement,
   SupplierStatementLine,
+  User,
+  UserRole,
   Transaction,
   Unit,
 } from '@/types'
@@ -156,6 +159,12 @@ interface AppState {
   batches: InventoryBatch[]
   transactions: Transaction[]
   suppliers: Supplier[]
+  /** 供应商付款记录：仅浏览器 mock 回退路径使用；Electron 环境一律走 supplier:pay / supplier:statement */
+  supplierPayments: SupplierPayment[]
+  /** 员工账号（v0.1）：当前登录用户；null=未启用员工登录或未登录 */
+  currentUser: User | null
+  /** 员工登录开关是否开启（决定要不要弹登录门） */
+  staffLoginOn: boolean
   stockTakes: StockTake[]
   stockTakeItems: StockTakeItem[]
   /** 客户列表（带欠款统计）；loadAll 不含客户，Electron 环境由 loadCustomers 单独拉取 */
@@ -313,6 +322,25 @@ interface AppState {
   loadAuditLogs: (action?: string) => Promise<void>
   /** 供应商对账单：进货明细 + 汇总 + 待收采购单金额 */
   supplierStatement: (supplierId: number) => Promise<SupplierStatement>
+  /** 登记供应商付款（v0.1） */
+  paySupplier: (input: {
+    supplierId: number
+    amount: number
+    method?: string
+    note?: string | null
+    payDate?: string
+    operator?: string | null
+  }) => Promise<SupplierPayment>
+
+  /** 员工账号（v0.1） */
+  loadStaffStatus: () => Promise<void>
+  staffLogin: (username: string, password: string) => Promise<User>
+  staffLogout: () => Promise<void>
+  listUsers: () => Promise<User[]>
+  createUser: (input: { name: string; username: string; password: string; role: UserRole }) => Promise<void>
+  updateUser: (id: number, input: { name?: string; password?: string; role?: UserRole; active?: number }) => Promise<void>
+  deleteUser: (id: number) => Promise<void>
+  setStaffLogin: (on: boolean) => Promise<void>
 
   createStockTake: (
     locationFilter: string | null,
@@ -482,6 +510,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   batches: [],
   transactions: [],
   suppliers: [],
+  supplierPayments: [],
+  currentUser: null,
+  staffLoginOn: false,
   stockTakes: [],
   stockTakeItems: [],
   customers: [],
@@ -1705,14 +1736,85 @@ export const useAppStore = create<AppState>((set, get) => ({
             .reduce((x, it) => x + (it.quantity - it.received_qty) * it.unit_cost, 0),
         0,
       )
+    const payments = s.supplierPayments
+      .filter((p) => p.supplier_id === supplierId)
+      .sort((a, b) => b.pay_date.localeCompare(a.pay_date) || b.id - a.id)
+    const totalAmount = lines.reduce((x, l) => x + l.amount, 0)
+    const totalPaid = payments.reduce((x, p) => x + p.amount, 0)
     return {
       supplier,
       lines,
-      totalAmount: lines.reduce((x, l) => x + l.amount, 0),
+      totalAmount,
       totalQty: lines.reduce((x, l) => x + l.quantity, 0),
       lastInboundAt: lines.length > 0 ? lines[lines.length - 1].date : null,
       pendingPoAmount,
+      totalPaid,
+      outstanding: totalAmount - totalPaid,
+      payments,
     }
+  },
+
+  /** 登记供应商付款（v0.1）：mock 路径与后端同口径（应付=进货额，付款只冲减） */
+  paySupplier: async (input) => {
+    if (backend) return backend.invoke('supplier:pay', input)
+    const s = get()
+    const amt = Math.round(input.amount)
+    if (!Number.isFinite(amt) || amt <= 0) throw new Error('付款金额要大于 0')
+    if (!s.suppliers.some((x) => x.id === input.supplierId)) throw new Error('供应商不存在')
+    const p: SupplierPayment = {
+      id: nextId(s.supplierPayments),
+      supplier_id: input.supplierId,
+      amount: amt,
+      method: input.method ?? '现金',
+      note: input.note ?? null,
+      pay_date: input.payDate ?? new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10),
+      operator: input.operator ?? null,
+    }
+    set({ supplierPayments: [...s.supplierPayments, p] })
+    return p
+  },
+
+  // ========== 员工账号（v0.1）：Electron 走 user:* 通道；浏览器 mock 路径保持关闭（不打扰 dev） ==========
+  loadStaffStatus: async () => {
+    if (!backend) {
+      set({ staffLoginOn: false, currentUser: null })
+      return
+    }
+    const on = await backend.invoke('user:staffLoginEnabled')
+    const cur = await backend.invoke('user:current')
+    set({ staffLoginOn: !!on, currentUser: cur ?? null })
+  },
+  staffLogin: async (username, password) => {
+    if (!backend) throw new Error('员工登录需要桌面版')
+    const u = await backend.invoke('user:login', { username, password })
+    set({ currentUser: u })
+    return u
+  },
+  staffLogout: async () => {
+    if (!backend) return
+    await backend.invoke('user:logout')
+    set({ currentUser: null })
+  },
+  listUsers: async () => {
+    if (!backend) return []
+    return backend.invoke('user:list')
+  },
+  createUser: async (input) => {
+    if (!backend) throw new Error('员工账号需要桌面版')
+    await backend.invoke('user:create', { ...input, operator: get().currentUser?.name ?? null })
+  },
+  updateUser: async (id, input) => {
+    if (!backend) throw new Error('员工账号需要桌面版')
+    await backend.invoke('user:update', { id, ...input, operator: get().currentUser?.name ?? null })
+  },
+  deleteUser: async (id) => {
+    if (!backend) throw new Error('员工账号需要桌面版')
+    await backend.invoke('user:delete', { id, operator: get().currentUser?.name ?? null })
+  },
+  setStaffLogin: async (on) => {
+    if (!backend) throw new Error('员工账号需要桌面版')
+    await backend.invoke('user:setStaffLogin', { on, operator: get().currentUser?.name ?? null })
+    set({ staffLoginOn: on })
   },
 
   createStockTake: async (locationFilter, operator, filters) => {

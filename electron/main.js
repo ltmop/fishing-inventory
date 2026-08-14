@@ -19,7 +19,7 @@ import * as feedback from './feedback.js'
 import { createInventoryServer } from './server.js'
 import { createPhotoStore } from './photo.js'
 import { initAutoUpdater, checkForUpdates, downloadAndInstall } from './updater.js'
-import { loadLicense, activateLicense, machineFingerprint, saveLevelToDb, quotaStatus, planFor, readLevelFromDb } from './license.js'
+import { loadLicense, activateLicense, machineFingerprint, saveLevelToDb, quotaStatus, planFor } from './license.js'
 import { initCloud, pairWithCloud, syncSnapshot, uploadBackup, listCloudBackups, restoreFromCloud, regenViewLink, getCloudState, stopScheduler as stopCloudScheduler, exitSnapshot as exitCloudSnapshot } from './cloud.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -161,6 +161,18 @@ function registerIpc() {
   handle('supplier:create', (d, p) => commands.createSupplier(d, p))
   handle('supplier:update', (d, p) => commands.updateSupplier(d, p.id, p))
   handle('supplier:delete', (d, p) => commands.deleteSupplier(d, p.id))
+  handle('supplier:pay', (d, p) => commands.paySupplier(d, p))
+  handle('supplier:payments', (d, p) => commands.supplierPayments(d, p))
+  // 员工账号（v0.1）
+  handle('user:list', (d) => commands.listUsers(d))
+  handle('user:create', (d, p) => commands.createUser(d, p, p?.operator))
+  handle('user:update', (d, p) => commands.updateUser(d, p.id, p, p?.operator))
+  handle('user:delete', (d, p) => commands.deleteUser(d, p.id, p?.operator))
+  handle('user:login', (d, p) => commands.login(d, p))
+  handle('user:logout', (d) => commands.logout(d))
+  handle('user:current', (d) => commands.currentUser(d))
+  handle('user:staffLoginEnabled', (d) => commands.staffLoginEnabled(d))
+  handle('user:setStaffLogin', (d, p) => commands.setStaffLogin(d, p.on, p?.operator))
   handle('stocktake:create', (d, p) => commands.createStockTake(d, p))
   handle('stocktake:updateItem', (d, p) => commands.updateStockTakeItem(d, p))
   handle('stocktake:complete', (d, p) => commands.completeStockTake(d, p.takeId))
@@ -306,13 +318,17 @@ function registerIpc() {
   handle('ai:clearKey', () => ai.clearApiKey())
   handle('ai:test', () => ai.testConnection())
   handle('ai:dailySummary', (d, p) => ai.dailySummary(p.stats ?? p))
-  // AI 助手对话（v3.0 版本门控）：进阶版及以上可用；普通版保留语音识别/拍照识别/打烊日报等基础 AI
-  handle('ai:chat', (d, p) => {
-    const lv = readLevelFromDb(db)
-    if (lv === 'free') {
-      return { ok: false, reason: 'AI 助手对话为进阶版及以上功能。语音识别、拍照识别、打烊日报等基础 AI 仍免费开放。' }
+  // AI 助手对话（v0.1 起全版本开放）：默认走官方网关，按版本每日额度（普通版 5 次/天免费试用）；
+  // 自备 Key（BYOK）的厂商不限次。超额提示升级。
+  handle('ai:chat', async (d, p) => {
+    if (!ai.usingOfficialGateway()) {
+      return ai.agentChat(p.messages ?? [])
     }
-    return ai.agentChat(p.messages ?? [])
+    const quota = commands.checkAiQuota(db, 'chat')
+    if (!quota.allow) return { ok: false, reason: quota.message }
+    const r = await ai.agentChat(p.messages ?? [])
+    if (r?.ok) commands.recordAiUsage(db, 'chat')
+    return r
   })
   // AI 视觉识别（拍照识别进货单）：v3.0 每日额度控制（普通20/进阶100/大师不限）
   handle('ai:parseInboundNote', async (d, p) => {

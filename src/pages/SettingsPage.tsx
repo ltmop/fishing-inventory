@@ -21,6 +21,7 @@ import { CloudCard } from './settings/CloudCard'
 import { MobileServerCard, type ServerStatus } from './settings/MobileServerCard'
 import { PaymentQrCard } from './settings/PaymentQrCard'
 import { ModelDownloadCard } from './settings/ModelDownloadCard'
+import { StaffCard } from './settings/StaffCard'
 import { PreferenceRow } from './settings/PreferenceRow'
 import { WakeWordCard } from './settings/WakeWordCard'
 
@@ -416,6 +417,9 @@ export function SettingsPage() {
 
       {/* 收款码：手机端开单选微信/支付宝时展示给顾客扫 */}
       <PaymentQrCard />
+
+      {/* 员工账号（v0.1）：多用户登录 + 老板/店员角色 */}
+      <StaffCard />
 
       {/* AI 视觉识别额度（v3.0） */}
       <AiQuotaCard />

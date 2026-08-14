@@ -1,16 +1,19 @@
 // AI 功能每日额度（v3.0）：按版本限每日用量，超额提示升级会员。
 // 视觉识别：普通版 20 次/天、进阶版 100 次/天、大师版不限。
+// AI 助手对话（v0.1）：仅对"走官方网关"的用户生效（普通版 5 次/天免费试用）；BYOK 自备 Key 不限次。
 // 铁律：任何环节挂掉静默放行（不阻断识别主流程），读不到版本按免费最严算。
 import { readLevelFromDb } from '../license.js'
 
-/** 各版本 AI 视觉每日额度（次/天）；Infinity=不限 */
+/** 各版本每日额度（次/天）；Infinity=不限 */
 export const AI_QUOTAS = {
-  free: 20,
-  pro: 100,
-  max: Infinity,
+  vision: { free: 20, pro: 100, max: Infinity },
+  chat: { free: 5, pro: 100, max: Infinity },
 }
 
-const FEATURES = ['vision']
+/** 功能中文名（超额提示用） */
+const FEATURE_NAMES = { vision: 'AI 视觉识别', chat: 'AI 助手对话' }
+
+const FEATURES = ['vision', 'chat']
 
 function todayStr() {
   const d = new Date()
@@ -34,7 +37,7 @@ function usedCount(db, feature) {
 /** 某功能当前版本今日额度（剩余次数）；大师版返回 Infinity */
 export function aiQuotaStatus(db, feature = 'vision') {
   const level = readLevelFromDb(db)
-  const limit = AI_QUOTAS[level] ?? AI_QUOTAS.free
+  const limit = (AI_QUOTAS[feature] ?? AI_QUOTAS.vision)[level] ?? AI_QUOTAS.vision.free
   const used = FEATURES.includes(feature) ? usedCount(db, feature) : 0
   return {
     feature,
@@ -55,9 +58,10 @@ export function checkAiQuota(db, feature = 'vision') {
   if (s.unlimited) return { allow: true }
   if (s.used < s.limit) return { allow: true }
   const planName = { free: '普通版', pro: '进阶版', max: '大师版' }[s.level] ?? '普通版'
+  const featName = FEATURE_NAMES[feature] ?? 'AI 功能'
   return {
     allow: false,
-    message: `今日 AI 视觉识别 ${s.limit} 次已用完（${planName}每日额度）。升级进阶版/大师版可解锁更多次数。`,
+    message: `今日${featName} ${s.limit} 次已用完（${planName}每日额度）。升级进阶版/大师版可解锁更多次数。`,
   }
 }
 

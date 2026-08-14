@@ -1,6 +1,7 @@
 // 套装（v2.2）：一套多个商品（新手套装/绑钩套装等），开单时一键加清单。
 // 打包价（v2.2）：套装可以设"一口价"或"总折扣"，卖的是打包便宜；开单时按打包价把组成件折算进清单。
 import { inTransaction, now, assertPositiveInt } from './helpers.js'
+import { assertOwnerAction } from './users.js'
 
 /** 归一套装打包价：null/undefined/空串 → null（不设）；否则必须是非负整数（分） */
 function kitPriceOrNull(v) {
@@ -93,6 +94,7 @@ export function saveKit(db, { id, name, price, discount_percent, items }) {
 
 /** 删除套装（明细随外键 CASCADE 一并删） */
 export function deleteKit(db, { id }) {
+  assertOwnerAction(db, '删除套装')
   const info = db.prepare('DELETE FROM kits WHERE id = ?').run(Number(id))
   if (info.changes === 0) throw new Error('套装不存在')
   return { ok: true }

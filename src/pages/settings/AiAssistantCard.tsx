@@ -17,6 +17,8 @@ interface Provider {
   model: string
   keyPage: string
   configured: boolean
+  /** 阿东官方 AI 服务：内置连接码，不用填 Key */
+  official?: boolean
 }
 
 interface AiAssistantCardProps {
@@ -54,6 +56,7 @@ export function AiAssistantCard({
   const cur = providers.find((p) => p.key === currentProvider)
   const curName = cur?.name ?? currentProvider
   const curPage = cur?.keyPage ?? ''
+  const curOfficial = !!cur?.official
 
   return (
     <Card>
@@ -72,8 +75,8 @@ export function AiAssistantCard({
           )}
         </CardTitle>
         <CardDescription>
-          选一个模型作为 AI 主力（Kimi/豆包/GLM/通义都能选），填它的 API Key 激活 AI 打烊日报。
-          Key 加密保存在本机，库存和经营数据不出本机。不填也不影响任何进销存功能。
+          默认使用「阿东官方 AI」开箱即用，不用自己申请 Key：普通版每日 5 次免费试用，进阶版 100 次，大师版不限。
+          也可以切换 Kimi/豆包/GLM 等填自己的 Key（自备 Key 不限次）。使用官方 AI 时，问题会发送到阿东 AI 服务分析；自备 Key 则数据不出官方通道。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -81,26 +84,32 @@ export function AiAssistantCard({
         <div className="flex flex-wrap items-center gap-3">
           <div className="text-sm font-medium text-muted-foreground">主力模型</div>
           <Select value={currentProvider} onValueChange={onProviderChange} disabled={!hasBackend || aiBusy}>
-            <SelectTrigger className="w-60">
+            <SelectTrigger className="w-72">
               <SelectValue placeholder="选择模型" />
             </SelectTrigger>
             <SelectContent>
               {providers.map((p) => (
                 <SelectItem key={p.key} value={p.key}>
-                  {p.name}（{p.configured ? '已配Key' : '未配Key'}）
+                  {p.name}（{p.official ? '官方服务·免填Key' : p.configured ? '已配Key' : '未配Key'}）
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
 
-        {/* 填当前模型的 Key */}
+        {/* 填当前模型的 Key（官方服务不用填，可留空；填了则替换内置连接码） */}
         <div className="flex flex-wrap items-center gap-3">
           <Input
             type="password"
             value={keyInput}
             onChange={(e) => onKeyInputChange(e.target.value)}
-            placeholder={aiConfigured ? `已保存 ${curName} 的 Key（输入新 Key 可替换）` : `粘贴 ${curName} 的 API Key`}
+            placeholder={
+              curOfficial
+                ? '官方服务已内置连接码（一般不用填；换新连接码时粘贴）'
+                : aiConfigured
+                  ? `已保存 ${curName} 的 Key（输入新 Key 可替换）`
+                  : `粘贴 ${curName} 的 API Key`
+            }
             className="w-96 font-mono text-xs"
             disabled={!hasBackend}
           />
@@ -112,7 +121,7 @@ export function AiAssistantCard({
           >
             {aiBusy ? '验证中...' : '保存并验证'}
           </Button>
-          {aiConfigured && (
+          {aiConfigured && !curOfficial && (
             <Button variant="outline" onClick={onClearKey}>
               停用并删除 Key
             </Button>
@@ -131,15 +140,19 @@ export function AiAssistantCard({
           </div>
         )}
         <div className="space-y-1 text-xs text-muted-foreground">
-          <p>没有 {curName} 的 Key？点这里申请（新用户有赠送额度）：</p>
-          <button
-            className="inline-flex items-center gap-1 text-brand-600 hover:underline"
-            onClick={() => curPage && onOpenExternal(curPage)}
-          >
-            <ExternalLink className="size-3" />
-            打开 {curName} 申请页
-          </button>
-          <p>切换模型后，AI 对话、打烊日报、进货单识别都会用选中的模型。没填 Key 或断网时 AI 功能自动隐藏。</p>
+          {!curOfficial && (
+            <>
+              <p>没有 {curName} 的 Key？点这里申请（新用户有赠送额度）：</p>
+              <button
+                className="inline-flex items-center gap-1 text-brand-600 hover:underline"
+                onClick={() => curPage && onOpenExternal(curPage)}
+              >
+                <ExternalLink className="size-3" />
+                打开 {curName} 申请页
+              </button>
+            </>
+          )}
+          <p>切换模型后，AI 对话、打烊日报、进货单识别都会用选中的模型。断网时 AI 自动降级不报错。</p>
         </div>
       </CardContent>
     </Card>

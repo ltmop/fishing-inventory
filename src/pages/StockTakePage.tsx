@@ -47,7 +47,8 @@ export function StockTakePage() {
   const [category, setCategory] = useState(WHOLE_SHOP)
   const [supplierKey, setSupplierKey] = useState(WHOLE_SHOP)
   const [mode, setMode] = useState<'batch' | 'sku'>('batch')
-  const [operator, setOperator] = useState('阿东')
+  // 员工登录（v0.1）后默认记登录人；没开员工登录保持老板名
+  const [operator, setOperator] = useState(() => useAppStore.getState().currentUser?.name ?? '阿东')
 
   // 完成盘点确认 Dialog
   const [finishOpen, setFinishOpen] = useState(false)

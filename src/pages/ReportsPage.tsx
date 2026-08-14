@@ -72,7 +72,7 @@ function marginText(m: number | null): string {
   return m === null ? '-' : `${(m * 100).toFixed(1)}%`
 }
 
-function StatCard({ title, stats, expense }: { title: string; stats: Stats; expense: number }) {
+function StatCard({ title, stats, expense, footnote }: { title: string; stats: Stats; expense: number; footnote?: string }) {
   const net = stats.profit - expense
   return (
     <Card className="h-full">
@@ -116,6 +116,9 @@ function StatCard({ title, stats, expense }: { title: string; stats: Stats; expe
             </div>
           </div>
         </div>
+        {footnote && (
+          <div className="mt-3 border-t pt-2 text-xs text-slate-500">{footnote}</div>
+        )}
       </CardContent>
     </Card>
   )
@@ -163,6 +166,51 @@ export function ReportsPage() {
     const prefix = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-`
     return expenses.filter((e) => e.expense_date.startsWith(prefix)).reduce((s, e) => s + e.amount, 0)
   }, [expenses])
+
+  // ========== 上月同期（月度环比，v0.1） ==========
+  const lastMonthStats = useMemo(() => {
+    const d = new Date()
+    const lm = d.getMonth() === 0 ? { y: d.getFullYear() - 1, m: 12 } : { y: d.getFullYear(), m: d.getMonth() }
+    const start = new Date(lm.y, lm.m - 1, 1)
+    const end = new Date(d.getFullYear(), d.getMonth(), 1)
+    return aggregate(saleTxs.filter((t) => {
+      const ts = new Date(t.timestamp)
+      return ts >= start && ts < end
+    }))
+  }, [saleTxs])
+  const lastMonthExpense = useMemo(() => {
+    const d = new Date()
+    const lm = d.getMonth() === 0 ? { y: d.getFullYear() - 1, m: 12 } : { y: d.getFullYear(), m: d.getMonth() }
+    const prefix = `${lm.y}-${String(lm.m).padStart(2, '0')}-`
+    return expenses.filter((e) => e.expense_date.startsWith(prefix)).reduce((s, e) => s + e.amount, 0)
+  }, [expenses])
+  /** 本月 vs 上月营业额环比文案（上月为 0 时只报金额不报百分比） */
+  const momText = useMemo(() => {
+    if (lastMonthStats.revenue <= 0) return monthStats.revenue > 0 ? '上月没开张，本月有生意了' : '上月和本月都还没开张'
+    const delta = (monthStats.revenue - lastMonthStats.revenue) / lastMonthStats.revenue
+    const pct = `${Math.abs(delta * 100).toFixed(0)}%`
+    return delta >= 0
+      ? `本月比上月营业额 ↑${pct}（上月 ${formatPrice(Math.round(lastMonthStats.revenue))}）`
+      : `本月比上月营业额 ↓${pct}（上月 ${formatPrice(Math.round(lastMonthStats.revenue))}）`
+  }, [monthStats.revenue, lastMonthStats.revenue])
+
+  // ========== 老客户多久没来了（v0.1）：有欠账/买过货的客户，超过 30 天没来 ==========
+  const lapsedCustomers = useMemo(() => {
+    const per = new Map<number, { last: string; total: number }>()
+    for (const t of saleTxs) {
+      if (t.customer_id == null) continue
+      const cur = per.get(t.customer_id) ?? { last: t.timestamp, total: 0 }
+      if (t.timestamp > cur.last) cur.last = t.timestamp
+      cur.total += (t.selling_price ?? 0) * t.quantity
+      per.set(t.customer_id, cur)
+    }
+    const cutoff = Date.now() - 30 * 86400_000
+    return [...per.entries()]
+      .map(([id, v]) => ({ customer: customers.find((c) => c.id === id), ...v }))
+      .filter((x) => x.customer && new Date(x.last).getTime() < cutoff)
+      .sort((a, b) => a.last.localeCompare(b.last))
+      .slice(0, 10)
+  }, [saleTxs, customers])
 
   // ========== 什么最赚钱：本月商品毛利排行 TOP20（可点表头排序） ==========
   const profitTop = useMemo(() => {
@@ -225,6 +273,26 @@ export function ReportsPage() {
   )
   const inventoryTotal = inventoryRows.reduce((s, r) => s + r.value, 0)
 
+  // ========== 什么卖不动（v0.1）：还有库存但 60 天没卖出，按占用资金排 ==========
+  const slowMoving = useMemo(() => {
+    const lastSale = new Map<number, string>()
+    for (const t of transactions) {
+      if (t.type !== 'out') continue
+      const cur = lastSale.get(t.product_id)
+      if (!cur || t.timestamp > cur) lastSale.set(t.product_id, t.timestamp)
+    }
+    const cutoff = Date.now() - 60 * 86400_000
+    return inventoryRows
+      .map((r) => {
+        const ls = lastSale.get(r.productId)
+        return { ...r, lastSaleAt: ls ?? null, stale: !ls || new Date(ls).getTime() < cutoff }
+      })
+      .filter((x) => x.stale)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 20)
+  }, [transactions, inventoryRows])
+  const slowValue = slowMoving.reduce((s, r) => s + r.value, 0)
+
   // ========== CSV 导出（与新报表同内容） ==========
   function exportCSV() {
     const yuan = (cents: number) => (cents / 100).toFixed(2)
@@ -249,6 +317,16 @@ export function ReportsPage() {
         yuan(monthStats.profit - monthExpense),
         monthStats.qty,
       ].join(','),
+      [
+        '上月',
+        yuan(lastMonthStats.revenue),
+        yuan(lastMonthStats.profit),
+        marginText(lastMonthStats.margin),
+        yuan(lastMonthExpense),
+        yuan(lastMonthStats.profit - lastMonthExpense),
+        lastMonthStats.qty,
+      ].join(','),
+      ['本月比上月', momText].join(','),
       '',
       '什么最赚钱（本月 Top20）',
       '商品名称,SKU,售出件数,营业额(元),毛利(元),毛利率',
@@ -283,6 +361,30 @@ export function ReportsPage() {
           .join(',')
       }),
       `库存总值,,,${yuan(inventoryTotal)}`,
+      '',
+      '老客户多久没来了（超过30天）',
+      '客户,电话,累计买过(元),最近来店',
+      ...lapsedCustomers.map((x) =>
+        [x.customer?.name ?? '-', x.customer?.phone ?? '-', yuan(x.total), formatDateTime(x.last)]
+          .map(csvCell)
+          .join(','),
+      ),
+      '',
+      '什么卖不动（60天没卖出）',
+      '商品名称,SKU,库存数量,占用资金(元),上次卖出',
+      ...slowMoving.map((x) => {
+        const p = products.find((pr) => pr.id === x.productId)
+        return [
+          p ? productName(p) : `#${x.productId}`,
+          p?.sku_code ?? '-',
+          x.qty,
+          yuan(x.value),
+          x.lastSaleAt ? formatDateTime(x.lastSaleAt) : '从没卖出过',
+        ]
+          .map(csvCell)
+          .join(',')
+      }),
+      `滞销占用资金合计,,,,${yuan(slowValue)}`,
     ].join('\n')
 
     const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' })
@@ -311,10 +413,11 @@ export function ReportsPage() {
         </button>
       </div>
 
-      {/* 赚了多少：今天 / 本月并排大数字（含支出与净利） */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      {/* 赚了多少：今天 / 本月 / 上月并排大数字（含支出与净利 + 月度环比） */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <StatCard title="今天赚了多少" stats={todayStats} expense={todayExpense} />
-        <StatCard title="本月赚了多少" stats={monthStats} expense={monthExpense} />
+        <StatCard title="本月赚了多少" stats={monthStats} expense={monthExpense} footnote={momText} />
+        <StatCard title="上月赚了多少" stats={lastMonthStats} expense={lastMonthExpense} />
       </div>
 
       {/* 日结对账：任意区间看每天的营业额/毛利/收款方式/赊账 */}
@@ -465,6 +568,113 @@ export function ReportsPage() {
                       <TableCell className="text-right tabular-nums">{x.qty}</TableCell>
                       <TableCell className="text-right font-medium tabular-nums text-slate-700">
                         {formatPrice(x.value)}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 老客户多久没来了（v0.1）：30 天没来的老客户，提醒回访 */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-base">
+            <Users className="mr-2 inline-block size-4 text-sky-500" />
+            老客户多久没来了（超过 30 天）
+          </CardTitle>
+          {lapsedCustomers.length > 0 && (
+            <span className="text-sm text-slate-500">按最久没来的排，最多看 10 位</span>
+          )}
+        </CardHeader>
+        <CardContent>
+          {lapsedCustomers.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              老客户最近都来过，关系维护得不错
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>客户</TableHead>
+                  <TableHead>电话</TableHead>
+                  <TableHead className="text-right">累计买过</TableHead>
+                  <TableHead className="text-right">最近来店</TableHead>
+                  <TableHead className="text-right">多久没来</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {lapsedCustomers.map((x) => {
+                  const days = Math.floor((Date.now() - new Date(x.last).getTime()) / 86400_000)
+                  return (
+                    <TableRow key={x.customer!.id}>
+                      <TableCell className="font-medium text-sky-700">{x.customer!.name}</TableCell>
+                      <TableCell>{x.customer!.phone ?? '-'}</TableCell>
+                      <TableCell className="text-right tabular-nums">{formatPrice(x.total)}</TableCell>
+                      <TableCell className="text-right text-muted-foreground">
+                        {formatDateTime(x.last)}
+                      </TableCell>
+                      <TableCell className="text-right font-medium tabular-nums text-amber-600">
+                        {days} 天
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 什么卖不动（v0.1）：60 天没卖出且还有库存，按占用资金排 */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-base">
+            <Package className="mr-2 inline-block size-4 text-amber-600" />
+            什么卖不动（60 天没卖出）
+          </CardTitle>
+          {slowMoving.length > 0 && (
+            <span className="text-sm text-slate-600">
+              压着 <span className="font-bold tabular-nums">{formatPrice(slowValue)}</span> 的货，考虑清仓或处理
+            </span>
+          )}
+        </CardHeader>
+        <CardContent>
+          {slowMoving.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              没有积压货，库存周转健康
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-12">#</TableHead>
+                  <TableHead>商品</TableHead>
+                  <TableHead className="text-right">库存数量</TableHead>
+                  <TableHead className="text-right">占用资金</TableHead>
+                  <TableHead className="text-right">上次卖出</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {slowMoving.map((x, i) => {
+                  const p = products.find((pr) => pr.id === x.productId)
+                  return (
+                    <TableRow key={x.productId}>
+                      <TableCell className="text-xs font-medium text-muted-foreground">{i + 1}</TableCell>
+                      <TableCell>
+                        <span>{p ? productName(p) : `#${x.productId}`}</span>
+                        {p && (
+                          <span className="ml-2 font-mono text-xs text-muted-foreground">{p.sku_code}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{x.qty}</TableCell>
+                      <TableCell className="text-right font-medium tabular-nums text-slate-700">
+                        {formatPrice(x.value)}
+                      </TableCell>
+                      <TableCell className="text-right text-muted-foreground">
+                        {x.lastSaleAt ? formatDateTime(x.lastSaleAt) : '从没卖出过'}
                       </TableCell>
                     </TableRow>
                   )

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { LoginGate } from '@/components/LoginGate'
 import { SplashScreen } from '@/components/SplashScreen'
 import { Layout } from '@/components/layout/Layout'
 import { DashboardPage } from '@/pages/DashboardPage'
@@ -65,8 +66,14 @@ function App() {
   const loaded = useAppStore((s) => s.loaded)
   const fontSizeMode = useAppStore((s) => s.fontSizeMode)
   const darkMode = useAppStore((s) => s.darkMode)
+  const loadStaffStatus = useAppStore((s) => s.loadStaffStatus)
   // 启动动画：数据就绪后播一次，播完才挂载路由（每次启动只播一次；点击或减弱动画直接跳过）
   const [splashDone, setSplashDone] = useState(false)
+
+  // 员工登录状态（v0.1）：数据就绪后查一次，开着员工登录就弹登录门
+  useEffect(() => {
+    if (loaded) void loadStaffStatus().catch(() => {})
+  }, [loaded, loadStaffStatus])
 
   // 大字模式：给 <html> 挂 text-large class，根字号提到 18px，全站 rem 字号整体放大
   useEffect(() => {
@@ -118,6 +125,8 @@ function App() {
 
   return (
     <ErrorBoundary>
+      {/* 员工登录门（v0.1）：开着员工登录且没人登录时覆盖全屏 */}
+      <LoginGate />
       {!splashDone && <SplashScreen onFinish={() => setSplashDone(true)} />}
       {splashDone && (
       <HashRouter>

@@ -75,7 +75,8 @@ export function InboundPage() {
   const [costYuan, setCostYuan] = useState('')
   const [location, setLocation] = useState('')
   const [supplierId, setSupplierId] = useState(NO_SUPPLIER)
-  const [operator, setOperator] = useState('阿东')
+  // 员工登录（v0.1）后默认记登录人；没开员工登录保持老板名
+  const [operator, setOperator] = useState(() => useAppStore.getState().currentUser?.name ?? '阿东')
   // 到期日（保质期商品用，可选）：饵料/小药/活饵等入库时填"该批到期日"，临期预警按批次算
   const [expiryDate, setExpiryDate] = useState('')
 

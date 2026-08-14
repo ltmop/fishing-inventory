@@ -16,7 +16,16 @@ const MAX_AGENT_ROUNDS = 5
 // ---------- 多模型提供商（AI 主力对话模型可切换） ----------
 // 每个提供商：OpenAI 兼容端点 + 默认模型 + 视觉模型 + 各自的 Key 文件。
 // 用户在某提供商页填 Key 后，切换它作为主力模型即可（如 Kimi 慢/贵，切豆包或 GLM）。
+// gateway = 阿东官方 AI 服务（v0.1）：内置连接码，新装默认选它，开箱即用不用配 Key；
+// 走官方网关的用量按版本每日限额（普通版免费试用），自备 Key 的厂商不限次。
+const OFFICIAL_GATEWAY_URL = 'http://43.128.20.39:17533'
+const OFFICIAL_GATEWAY_TOKEN = 'adu-desktop-0.1'
 const PROVIDERS = {
+  gateway: {
+    name: '阿东官方AI', baseUrl: OFFICIAL_GATEWAY_URL, model: 'doubao-seed-2-1-turbo-260628',
+    vision: null, keyFile: 'gateway-token.enc', keyPrefix: '', keyPage: '',
+    chatPath: '/v1/chat/completions', authHeader: 'x-token', builtinToken: OFFICIAL_GATEWAY_TOKEN,
+  },
   kimi: {
     name: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
     vision: 'moonshot-v1-8k-vision-preview', keyFile: 'ai-key.enc', keyPrefix: 'sk-',
@@ -47,7 +56,7 @@ const PROVIDERS = {
 
 let dataDir = null
 let db = null
-let currentProviderName = 'kimi'
+let currentProviderName = 'gateway' // v0.1 起默认官方 AI 服务，开箱即用
 
 /** 主进程启动时调用一次，确定数据目录 + 读取上次选的提供商 */
 export function initAi(dir) {
@@ -55,7 +64,7 @@ export function initAi(dir) {
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(dataDir, 'ai-config.json'), 'utf8'))
     if (cfg?.provider && PROVIDERS[cfg.provider]) currentProviderName = cfg.provider
-  } catch { /* 没配置过用默认 kimi */ }
+  } catch { /* 没配置过用默认 gateway（官方服务） */ }
 }
 
 function currentProvider() {
@@ -73,14 +82,17 @@ function saveProviderConfig() {
   } catch { /* 存不住不致命 */ }
 }
 
-/** 提供商列表（设置页用）：每个的配置状态 */
+/** 提供商列表（设置页用）：每个的配置状态；official=true 是阿东官方服务（不用填 Key） */
 export function aiProviders() {
   return Object.entries(PROVIDERS).map(([key, p]) => ({
     key,
     name: p.name,
     model: p.model,
     keyPage: p.keyPage,
-    configured: !!keyFileFor(key) && fs.existsSync(keyFileFor(key)) && fs.statSync(keyFileFor(key)).size > 0,
+    official: !!p.builtinToken,
+    configured: p.builtinToken
+      ? true // 官方服务内置连接码，永远可用
+      : !!keyFileFor(key) && fs.existsSync(keyFileFor(key)) && fs.statSync(keyFileFor(key)).size > 0,
   }))
 }
 
@@ -98,13 +110,26 @@ export function bindDb(database) {
 }
 
 export function hasApiKey() {
+  const p = currentProvider()
+  if (p.builtinToken) return true // 官方服务：内置连接码（用户改过则以文件为准，readApiKey 处理）
   const f = keyFileFor(currentProviderName)
   try { return !!f && fs.existsSync(f) && fs.statSync(f).size > 0 } catch { return false }
 }
 
 export function aiStatus() {
   const p = currentProvider()
-  return { configured: hasApiKey(), model: p.model, provider: p.name, providerKey: currentProviderName }
+  return {
+    configured: hasApiKey(),
+    model: p.model,
+    provider: p.name,
+    providerKey: currentProviderName,
+    official: !!p.builtinToken,
+  }
+}
+
+/** 当前主力是否官方网关（决定 ai:chat 走每日额度还是 BYOK 不限次） */
+export function usingOfficialGateway() {
+  return currentProviderName === 'gateway'
 }
 
 /** 保存 Key（写到当前选中的提供商） */
@@ -134,6 +159,19 @@ export function clearApiKey() {
 }
 
 function readApiKey() {
+  const p = currentProvider()
+  if (p.builtinToken) {
+    // 官方服务：用户没改过连接码用内置值；改过（存了文件）用文件里的
+    const f = keyFileFor(currentProviderName)
+    try {
+      if (f && fs.existsSync(f) && fs.statSync(f).size > 0) {
+        const raw = fs.readFileSync(f, 'utf8')
+        if (raw.startsWith('plain:')) return Buffer.from(raw.slice(6), 'base64').toString('utf8')
+        return safeStorage.decryptString(Buffer.from(raw, 'base64'))
+      }
+    } catch { /* 读文件失败回退内置码 */ }
+    return p.builtinToken
+  }
   if (!hasApiKey()) return null
   const f = keyFileFor(currentProviderName)
   try {
@@ -151,7 +189,8 @@ async function chatRaw(messages, { tools = undefined, maxTokens = 300, model } =
   if (!key) return { ok: false, reason: 'no-key' }
   const p = currentProvider()
   const useModel = model ?? p.model
-  const url = `${p.baseUrl}/chat/completions`
+  // 官方网关用自定义端点（/v1/chat/completions）+ x-token 鉴权；标准 OpenAI 厂商走 /chat/completions + Bearer
+  const url = `${p.baseUrl}${p.chatPath ?? '/chat/completions'}`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
@@ -160,13 +199,13 @@ async function chatRaw(messages, { tools = undefined, maxTokens = 300, model } =
       body.tools = tools
       body.tool_choice = 'auto'
     }
+    const headers = { 'Content-Type': 'application/json' }
+    if (p.authHeader) headers[p.authHeader] = key
+    else headers.Authorization = `Bearer ${key}`
     const res = await fetch(url, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${key}`,
-      },
+      headers,
       body: JSON.stringify(body),
     })
     if (!res.ok) {

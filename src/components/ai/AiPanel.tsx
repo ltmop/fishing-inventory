@@ -61,6 +61,7 @@ export function AiPanel() {
   const confirmOutbound = useAppStore((s) => s.confirmOutbound)
 
   const [enabled, setEnabled] = useState(false)
+  const [providerName, setProviderName] = useState('AI')
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [thinking, setThinking] = useState(false)
@@ -128,7 +129,10 @@ export function AiPanel() {
     if (!backend) return
     backend
       .invoke('ai:status')
-      .then((s) => setEnabled(!!s?.configured))
+      .then((s) => {
+        setEnabled(!!s?.configured)
+        if (typeof s?.provider === 'string' && s.provider) setProviderName(s.provider)
+      })
       .catch(() => {})
     // 启动恢复历史对话（ai_messages 表，只含 user/assistant）；失败静默保持空面板
     backend
@@ -148,7 +152,8 @@ export function AiPanel() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, thinking])
 
-  if (!backend || !enabled) return null
+  // v0.1 起内置官方 AI 服务（默认可用），面板不再因没配 Key 隐藏——卖点必须看得见
+  if (!backend) return null
   // guard 之后的非空别名（TS 闭包窄化限制）
   const fi = backend
 
@@ -381,7 +386,7 @@ export function AiPanel() {
         <CardTitle className="flex items-center gap-2 text-base">
           <Sparkles className="size-5 text-brand-500" />
           AI 助手 · 直接问店里的事
-          <span className="text-xs font-normal text-muted-foreground">由 Kimi 生成，数字来自本地库存记录</span>
+          <span className="text-xs font-normal text-muted-foreground">由{providerName}生成，数字来自本地库存记录</span>
           {/* 语音播报开关（与设置页共享 localStorage 'fi-tts'） */}
           <button
             type="button"
