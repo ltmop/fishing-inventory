@@ -12,6 +12,10 @@ export interface ServerStatus {
   port: number | null
   ip: string
   url: string | null
+  /** HTTPS 是否可用（语音/摄像头识别必需） */
+  httpsEnabled?: boolean
+  /** 纯 HTTP 地址（HTTPS 不可用时兜底） */
+  httpUrl?: string | null
   /** 局域网全功能版地址（桌面应用被打包到 dist 时才有） */
   appUrl?: string | null
   error?: string | null
@@ -73,9 +77,14 @@ export function MobileServerCard({
               <div className="text-muted-foreground">
                 服务地址：<span className="font-mono text-xs text-brand-700">{`http://${serverStatus.ip}:${serverStatus.port}`}</span>
               </div>
-              <div className="space-y-1 text-xs text-muted-foreground">
+            <div className="space-y-1 text-xs text-muted-foreground">
                 <p>· 手机要和这台电脑连同一个 WiFi 才打得开。</p>
                 <p>· 首次使用如弹出 Windows 防火墙提示，请点「允许」。</p>
+                {serverStatus?.httpsEnabled && (
+                  <p className="text-amber-700">
+                    · 链接用的是 https（语音/摄像头识别需要）。第一次打开手机会提示「连接不是私密连接」→ 点「高级」→「继续访问」，只需这一次。
+                  </p>
+                )}
                 <p>· 页面每 30 秒自动刷新；可以把页面「添加到主屏幕」，像个小的看店 App。</p>
               </div>
               <Button

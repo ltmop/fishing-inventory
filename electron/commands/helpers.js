@@ -13,6 +13,34 @@ export function assertPositiveInt(v, name) {
   }
 }
 
+/** 归一化数量到 1 位小数（件商品整数不变；米商品 3.5 米归一后仍是 3.5） */
+export function roundQty(v) {
+  return Math.round((Number(v) + Number.EPSILON) * 10) / 10
+}
+
+/**
+ * 按商品计量单位校验数量（v2.2）：
+ * - 件（默认）：必须是正整数（与 assertPositiveInt 同口径）
+ * - 米：必须是有限正数，且最多 1 位小数（roundQty 归一后无精度损失）
+ * 非法直接 throw，合法返回归一化数量。
+ */
+export function assertQuantity(v, name, unit) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) throw new Error(`${name}必须是数字，收到：${v}`)
+  if (unit === '米') {
+    if (n <= 0) throw new Error(`${name}必须大于 0，收到：${v}`)
+    const rounded = roundQty(n)
+    if (Math.abs(rounded - n) >= 1e-9) {
+      throw new Error(`${name}最多 1 位小数，收到：${v}`)
+    }
+    return rounded
+  }
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name}必须是正整数，收到：${v}`)
+  }
+  return n
+}
+
 /** 校验金额（单位：分）必须是非负整数 */
 export function assertFen(v, name) {
   if (!Number.isInteger(v) || v < 0) {

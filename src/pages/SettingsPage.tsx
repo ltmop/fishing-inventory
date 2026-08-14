@@ -9,15 +9,17 @@ import { readTtsEnabled, writeTtsEnabled } from '@/lib/tts'
 import { readWakeEnabled, writeWakeEnabled, startWakeListener, stopWakeListener } from '@/lib/wakeWord'
 import { useVoiceModel, useTtsModel, useKwsModel } from '@/lib/useModelDownload'
 import { useOnline } from '@/lib/useOnline'
-import { useLicense, daysText } from '@/lib/license'
+import { useLicense, daysText, LEVEL_NAMES } from '@/lib/license'
 import { useAppStore } from '@/store/appStore'
 import type { BackupStatus } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { AiAssistantCard } from './settings/AiAssistantCard'
+import { AiQuotaCard } from './settings/AiQuotaCard'
 import { BackupCard } from './settings/BackupCard'
 import { FeedbackCard } from './settings/FeedbackCard'
 import { CloudCard } from './settings/CloudCard'
 import { MobileServerCard, type ServerStatus } from './settings/MobileServerCard'
+import { PaymentQrCard } from './settings/PaymentQrCard'
 import { ModelDownloadCard } from './settings/ModelDownloadCard'
 import { PreferenceRow } from './settings/PreferenceRow'
 import { WakeWordCard } from './settings/WakeWordCard'
@@ -57,11 +59,13 @@ export function SettingsPage() {
     writeTtsEnabled(next)
   }
 
-  // AI 助手（BYOK）
+  // AI 助手（多模型提供商：Kimi/豆包/GLM/通义，可切换主力模型）
   const [aiConfigured, setAiConfigured] = useState(false)
   const [keyInput, setKeyInput] = useState('')
   const [aiBusy, setAiBusy] = useState(false)
   const [aiMessage, setAiMessage] = useState<{ ok: boolean; text: string } | null>(null)
+  const [providers, setProviders] = useState<{ key: string; name: string; model: string; keyPage: string; configured: boolean }[]>([])
+  const [currentProvider, setCurrentProvider] = useState('kimi')
   // 离线时联网功能（AI 验证、申请 Key）置灰
   const online = useOnline()
 
@@ -198,7 +202,11 @@ export function SettingsPage() {
       backend.invoke('backup:status').then(setBStatus).catch(() => {})
       backend
         .invoke('ai:status')
-        .then((s) => setAiConfigured(!!s?.configured))
+        .then((s) => { setAiConfigured(!!s?.configured); if (s?.providerKey) setCurrentProvider(s.providerKey) })
+        .catch(() => {})
+      backend
+        .invoke('ai:providers')
+        .then(setProviders)
         .catch(() => {})
       backend
         .invoke('server:status')
@@ -234,6 +242,24 @@ export function SettingsPage() {
     await backend.invoke('ai:clearKey').catch(() => {})
     setAiConfigured(false)
     setAiMessage({ ok: true, text: '已停用 AI 助手，Key 已从本机删除' })
+  }
+
+  // 切换主力 AI 模型提供商
+  const handleProviderChange = async (provider: string) => {
+    if (!backend || provider === currentProvider) return
+    setAiBusy(true)
+    setAiMessage(null)
+    try {
+      const s = await backend.invoke('ai:setProvider', { provider })
+      setCurrentProvider(provider)
+      setAiConfigured(!!s?.configured)
+      setKeyInput('')
+      setAiMessage({ ok: true, text: `已切换到 ${providers.find((p) => p.key === provider)?.name ?? provider}。` + (s?.configured ? ' 该模型已配好 Key，可以直接用。' : ' 需要先填这个模型的 API Key。') })
+    } catch (e) {
+      setAiMessage({ ok: false, text: e instanceof Error ? e.message : '切换失败' })
+    } finally {
+      setAiBusy(false)
+    }
   }
 
   const handleBackup = async () => {
@@ -388,7 +414,13 @@ export function SettingsPage() {
         onRegenerateToken={handleRegenerateToken}
       />
 
-      {/* AI 助手（BYOK） */}
+      {/* 收款码：手机端开单选微信/支付宝时展示给顾客扫 */}
+      <PaymentQrCard />
+
+      {/* AI 视觉识别额度（v3.0） */}
+      <AiQuotaCard />
+
+      {/* AI 助手（多模型提供商） */}
       <AiAssistantCard
         hasBackend={!!backend}
         aiConfigured={aiConfigured}
@@ -397,19 +429,22 @@ export function SettingsPage() {
         aiBusy={aiBusy}
         aiMessage={aiMessage}
         online={online}
+        providers={providers}
+        currentProvider={currentProvider}
+        onProviderChange={(p) => void handleProviderChange(p)}
         onSaveKey={handleSaveKey}
         onClearKey={handleClearKey}
         onOpenExternal={(url) => void backend?.invoke('app:openExternal', url)}
       />
 
-      {/* 语音识别模型（本地离线识别） */}
+      {/* 语音识别模型（本地离线识别，阿里 SenseVoiceSmall 约228MB） */}
       <ModelDownloadCard
         icon={<Mic className="size-5 text-brand-500" />}
         title="语音识别模型"
-        description={'AI 助手"按住说话"用的识别模型，下载后完全离线识别，没网也能用，说话内容不出本机。'}
+        description={'AI 助手"按住说话"用的识别模型（阿里 SenseVoice），下载后完全离线识别，没网也能用，中文识别准，说话内容不出本机。'}
         model={voice}
-        readyText="模型已就绪（约78MB），按住说话走本地离线识别。"
-        downloadLabel="下载模型（约78MB）"
+        readyText="模型已就绪（约228MB），按住说话走本地离线识别。"
+        downloadLabel="下载模型（约228MB）"
         notReadyHint="未下载：按住说话暂时走在线识别，下载后自动切换为离线识别"
         hasBackend={!!backend}
         online={online}
@@ -493,8 +528,8 @@ export function SettingsPage() {
           </CardTitle>
           <CardDescription>
             {license.activated
-              ? `Pro 已激活 · ${daysText(license.daysLeft)}`
-              : '免费版 · 所有基础功能永久免费'}
+              ? `${LEVEL_NAMES[license.level] ?? '普通版'} 已激活 · ${daysText(license.daysLeft)}`
+              : '普通版 · 免费，语音输入/云备份/收款对账全开放'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -503,7 +538,7 @@ export function SettingsPage() {
               <div className="text-slate-600">
                 状态：
                 <span className={license.activated ? 'font-medium text-green-700' : 'text-slate-500'}>
-                  {license.activated ? `Pro · ${daysText(license.daysLeft)}` : '免费版'}
+                  {license.activated ? `${LEVEL_NAMES[license.level] ?? '普通版'} · ${daysText(license.daysLeft)}` : '普通版'}
                 </span>
               </div>
               <div className="text-xs text-muted-foreground">
@@ -521,7 +556,7 @@ export function SettingsPage() {
                 onClick={() => navigate('/activate')}
                 className="rounded bg-brand-100 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-200 cursor-pointer"
               >
-                {license.activated ? '管理授权' : '升级 Pro'}
+                {license.activated ? '管理授权' : '升级进阶版'}
               </button>
             </div>
           </div>

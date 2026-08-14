@@ -5,6 +5,7 @@
 import { backend } from '@/lib/api'
 
 const LS_TTS = 'fi-tts'
+const LS_TTS_SPEAKER = 'fi-tts-speaker'
 
 /** 语音播报开关，默认开；读写都包 try/catch（隐私模式退回默认值） */
 export function readTtsEnabled(): boolean {
@@ -22,6 +23,29 @@ export function writeTtsEnabled(on: boolean): void {
     window.localStorage.setItem(LS_TTS, on ? 'on' : 'off')
   } catch {
     // 写不进去就算了，设置只在本次会话生效
+  }
+}
+
+/** 小杜音色：固定一个女性声线（aishell3 模型里的一个女声说话人）。老板不用选，就是它。 */
+export const DU_XIAO_DU_SPEAKER = 3
+
+/** 小杜的音色（固定女性声线）；读偏好，没存过用默认女性音色 */
+export function readTtsSpeaker(): number {
+  try {
+    if (typeof window === 'undefined') return DU_XIAO_DU_SPEAKER
+    const v = Number(window.localStorage.getItem(LS_TTS_SPEAKER))
+    return Number.isInteger(v) && v >= 0 && v < 174 ? v : DU_XIAO_DU_SPEAKER
+  } catch {
+    return DU_XIAO_DU_SPEAKER
+  }
+}
+
+export function writeTtsSpeaker(sid: number): void {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(LS_TTS_SPEAKER, String(Math.max(0, Math.min(173, Math.round(sid)))))
+  } catch {
+    // 写不进去就算了
   }
 }
 
@@ -75,7 +99,8 @@ function ensureSherpaReady(): Promise<boolean> {
 async function speakViaSherpa(content: string): Promise<boolean> {
   try {
     if (!backend) return false
-    const r = await backend.invoke('tts:speak', { text: content })
+    // 用老板选的小杜音色（sid），没选过默认 0
+    const r = await backend.invoke('tts:speak', { text: content, sid: readTtsSpeaker() })
     if (!r?.ok || !(r.wav instanceof Uint8Array) || r.wav.length === 0) return false
     stopCurrentAudio()
     const copy = new Uint8Array(r.wav) // 拷贝一份，Blob 不引用 IPC 缓冲

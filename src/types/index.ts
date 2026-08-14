@@ -94,6 +94,10 @@ export interface Product {
   min_stock: number | null
   /** 计量单位（v2.2）：件=整数按个卖（默认）；米=鱼线按长度小数卖 */
   unit?: '件' | '米' | null
+  /** 手动标记（v2.9）：1=热销（老板标的"卖得好/推荐"）；0=未标 */
+  is_hot?: number
+  /** 手动标记（v2.9）：1=处理货（清仓甩卖）；0=未标 */
+  is_clearance?: number
   status: ProductStatus
   created_at: string
   updated_at: string
@@ -429,6 +433,10 @@ export interface BackupStatus {
 export interface Kit {
   id: number
   name: string
+  /** 打包一口价（分）：NULL=没设，按组成件现价加清单 */
+  price?: number | null
+  /** 总折扣（如 90 = 9 折）：NULL=不设；设了一口价则一口价优先 */
+  discount_percent?: number | null
   created_at: string
   updated_at: string
 }
@@ -444,6 +452,10 @@ export interface KitItem {
 export interface KitInput {
   id?: number
   name: string
+  /** 打包一口价（分，可选）；设了优先于折扣 */
+  price?: number | null
+  /** 总折扣（如 90 = 9 折，可选） */
+  discount_percent?: number | null
   items: { productId: number; quantity: number }[]
 }
 

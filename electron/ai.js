@@ -7,20 +7,89 @@
 import { safeStorage } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
-import { saveAiMessage, listAiMessages, saveInsight, listInsights, buildInsightsContext } from './db.js'
+import { saveAiMessage, listAiMessages, saveInsight, listInsights, searchInsights, buildInsightsContext } from './db.js'
+import { analyzeImageBase64 as doubaoVision } from './doubao.js'
 
-const API_URL = 'https://api.moonshot.cn/v1/chat/completions'
-const MODEL = 'moonshot-v1-8k'
-const VISION_MODEL = 'moonshot-v1-8k-vision-preview'
 const TIMEOUT_MS = 30_000
 const MAX_AGENT_ROUNDS = 5
 
-let keyFile = null
-let db = null
+// ---------- 多模型提供商（AI 主力对话模型可切换） ----------
+// 每个提供商：OpenAI 兼容端点 + 默认模型 + 视觉模型 + 各自的 Key 文件。
+// 用户在某提供商页填 Key 后，切换它作为主力模型即可（如 Kimi 慢/贵，切豆包或 GLM）。
+const PROVIDERS = {
+  kimi: {
+    name: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
+    vision: 'moonshot-v1-8k-vision-preview', keyFile: 'ai-key.enc', keyPrefix: 'sk-',
+    keyPage: 'https://platform.moonshot.cn/console/api-keys',
+  },
+  doubao: {
+    name: '豆包（火山方舟）', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-2-1-turbo-260628',
+    vision: 'doubao-seed-2-1-turbo-260628', keyFile: 'doubao-key.enc', keyPrefix: '',
+    keyPage: 'https://console.volcengine.com/ark',
+  },
+  glm: {
+    name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+    vision: 'glm-4v-flash', keyFile: 'glm-key.enc', keyPrefix: '',
+    keyPage: 'https://open.bigmodel.cn/usercenter/apikeys',
+  },
+  qwen: {
+    name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus',
+    vision: 'qwen-vl-plus', keyFile: 'qwen-key.enc', keyPrefix: 'sk-',
+    keyPage: 'https://bailian.console.aliyun.com',
+  },
+  deepseek: {
+    name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat',
+    vision: null, // DeepSeek 没有视觉模型，进货单识别会自动走豆包兜底
+    keyFile: 'deepseek-key.enc', keyPrefix: 'sk-',
+    keyPage: 'https://platform.deepseek.com/api_keys',
+  },
+}
 
-/** 主进程启动时调用一次，确定密钥文件位置 */
-export function initAi(dataDir) {
-  keyFile = path.join(dataDir, 'ai-key.enc')
+let dataDir = null
+let db = null
+let currentProviderName = 'kimi'
+
+/** 主进程启动时调用一次，确定数据目录 + 读取上次选的提供商 */
+export function initAi(dir) {
+  dataDir = dir
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dataDir, 'ai-config.json'), 'utf8'))
+    if (cfg?.provider && PROVIDERS[cfg.provider]) currentProviderName = cfg.provider
+  } catch { /* 没配置过用默认 kimi */ }
+}
+
+function currentProvider() {
+  return PROVIDERS[currentProviderName] ?? PROVIDERS.kimi
+}
+
+function keyFileFor(name) {
+  return dataDir ? path.join(dataDir, PROVIDERS[name].keyFile) : null
+}
+
+function saveProviderConfig() {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true })
+    fs.writeFileSync(path.join(dataDir, 'ai-config.json'), JSON.stringify({ provider: currentProviderName }), 'utf8')
+  } catch { /* 存不住不致命 */ }
+}
+
+/** 提供商列表（设置页用）：每个的配置状态 */
+export function aiProviders() {
+  return Object.entries(PROVIDERS).map(([key, p]) => ({
+    key,
+    name: p.name,
+    model: p.model,
+    keyPage: p.keyPage,
+    configured: !!keyFileFor(key) && fs.existsSync(keyFileFor(key)) && fs.statSync(keyFileFor(key)).size > 0,
+  }))
+}
+
+/** 切换主力提供商 */
+export function setProvider(name) {
+  if (!PROVIDERS[name]) throw new Error('不支持的 AI 提供商')
+  currentProviderName = name
+  saveProviderConfig()
+  return aiStatus()
 }
 
 /** 数据库就绪后绑定，供工具集查询（只读；写操作一律走草稿） */
@@ -29,22 +98,21 @@ export function bindDb(database) {
 }
 
 export function hasApiKey() {
-  try {
-    return !!keyFile && fs.existsSync(keyFile) && fs.statSync(keyFile).size > 0
-  } catch {
-    return false
-  }
+  const f = keyFileFor(currentProviderName)
+  try { return !!f && fs.existsSync(f) && fs.statSync(f).size > 0 } catch { return false }
 }
 
 export function aiStatus() {
-  return { configured: hasApiKey(), model: MODEL, provider: 'Kimi（月之暗面）' }
+  const p = currentProvider()
+  return { configured: hasApiKey(), model: p.model, provider: p.name, providerKey: currentProviderName }
 }
 
-/** 保存 Key：优先 safeStorage 系统级加密，不可用时退化为 base64（仅防君子） */
+/** 保存 Key（写到当前选中的提供商） */
 export function setApiKey(key) {
   const trimmed = String(key ?? '').trim()
   if (!trimmed) throw new Error('API Key 不能为空')
-  if (!/^sk-[\w-]{10,}$/.test(trimmed)) throw new Error('Key 格式看起来不对（应以 sk- 开头）')
+  const p = currentProvider()
+  if (p.keyPrefix && !trimmed.startsWith(p.keyPrefix)) throw new Error(`Key 格式看起来不对（应以 ${p.keyPrefix} 开头）`)
   let payload
   try {
     payload = safeStorage.isEncryptionAvailable()
@@ -53,23 +121,23 @@ export function setApiKey(key) {
   } catch {
     payload = `plain:${Buffer.from(trimmed, 'utf8').toString('base64')}`
   }
-  fs.writeFileSync(keyFile, payload, 'utf8')
+  const f = keyFileFor(currentProviderName)
+  fs.mkdirSync(dataDir, { recursive: true })
+  fs.writeFileSync(f, payload, 'utf8')
   return aiStatus()
 }
 
 export function clearApiKey() {
-  try {
-    if (hasApiKey()) fs.unlinkSync(keyFile)
-  } catch {
-    // 删除失败也按未配置返回
-  }
+  const f = keyFileFor(currentProviderName)
+  try { if (f && fs.existsSync(f)) fs.unlinkSync(f) } catch { /* 删除失败也按未配置返回 */ }
   return aiStatus()
 }
 
 function readApiKey() {
   if (!hasApiKey()) return null
+  const f = keyFileFor(currentProviderName)
   try {
-    const raw = fs.readFileSync(keyFile, 'utf8')
+    const raw = fs.readFileSync(f, 'utf8')
     if (raw.startsWith('plain:')) return Buffer.from(raw.slice(6), 'base64').toString('utf8')
     return safeStorage.decryptString(Buffer.from(raw, 'base64'))
   } catch {
@@ -78,18 +146,21 @@ function readApiKey() {
 }
 
 /** 原始请求：返回完整 message（含 tool_calls），失败统一吞成 { ok:false, reason } */
-async function chatRaw(messages, { tools = undefined, maxTokens = 300, model = MODEL } = {}) {
+async function chatRaw(messages, { tools = undefined, maxTokens = 300, model } = {}) {
   const key = readApiKey()
   if (!key) return { ok: false, reason: 'no-key' }
+  const p = currentProvider()
+  const useModel = model ?? p.model
+  const url = `${p.baseUrl}/chat/completions`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const body = { model, messages, temperature: 0.3, max_tokens: maxTokens }
+    const body = { model: useModel, messages, temperature: 0.3, max_tokens: maxTokens }
     if (tools) {
       body.tools = tools
       body.tool_choice = 'auto'
     }
-    const res = await fetch(API_URL, {
+    const res = await fetch(url, {
       method: 'POST',
       signal: controller.signal,
       headers: {
@@ -186,38 +257,46 @@ export async function parseInboundNote({ imageBase64, mimeType } = {}) {
     )
     .join('\n')
 
-  const r = await chatRaw(
-    [
-      {
-        role: 'system',
-        content:
-          '你是渔具店的入库录单员。用户拍了一张送货单/进货单的照片，你要把单据上的商品逐行识别出来。' +
-          '只输出 JSON，不要 markdown 代码块，不要任何解释文字。',
-      },
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text:
-              '识别这张送货单，输出格式：\n' +
-              '{"items":[{"brand":"品牌","model":"型号","category":"品类","quantity":数量,"cost_price_yuan":单价数字,"product_id":匹配ID或null}]}\n' +
-              '规则：\n' +
-              '1. 能与店内商品清单匹配的行填 product_id（清单第一列），匹配不上填 null\n' +
-              '2. category 必须是：鱼竿/鱼线/鱼钩/渔轮/浮漂/铅坠/饵料/路亚假饵/渔网/钓箱钓椅/伞/遮阳/支架/服装穿戴/灯具/工具配件/收纳包具/增氧保鲜/活饵/小药/其他 之一\n' +
-              '3. 金额只填数字（单位元），看不清的字段填 null，整行看不清就跳过\n' +
-              '4. 只输出 JSON\n\n' +
-              `店内商品清单（ID|品牌|型号|品类|最近进价）：\n${productList || '（店内暂无商品）'}`,
-          },
-          { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
-        ],
-      },
-    ],
-    { model: VISION_MODEL, maxTokens: 1200 },
-  )
-  if (!r.ok) return r
+  // 识别指令：强调品牌+型号（规格）必须逐个提取，是渔具店老板最关心的
+  const prompt =
+    '你是渔具店的入库录单员。识别这张送货单/进货单，把上面的商品**逐行**提取出来。' +
+    '只输出 JSON，不要 markdown 代码块，不要任何解释文字。\n' +
+    '输出格式：\n' +
+    '{"items":[{"brand":"品牌","model":"型号/规格","category":"品类","quantity":数量,"cost_price_yuan":单价数字,"product_id":匹配ID或null}]}\n' +
+    '规则：\n' +
+    '1. **品牌(brand)和型号(model)是必须的**：单据上写了什么就抄什么（如 brand:"光威", model:"赤刃4.5m 28调"）。品牌看不清填 null，型号填你看到的规格。\n' +
+    '2. 能与店内商品清单匹配的行填 product_id（清单第一列），匹配不上填 null\n' +
+    '3. category 必须是：鱼竿/鱼线/鱼钩/渔轮/浮漂/铅坠/饵料/路亚假饵/渔网/钓箱钓椅/伞/遮阳/支架/服装穿戴/灯具/工具配件/收纳包具/增氧保鲜/活饵/小药/其他 之一\n' +
+    '4. 金额只填数字（单位元），看不清的字段填 null，整行看不清就跳过\n' +
+    '5. 只输出 JSON\n\n' +
+    `店内商品清单（ID|品牌|型号|品类|最近进价）：\n${productList || '（店内暂无商品）'}`
 
-  const text = r.message.content?.trim() ?? ''
+  // 优先豆包视觉（中文单据识别更准），超时/失败再降级 Kimi 视觉
+  let text = null
+  const doubaoRes = await doubaoVision({ imageBase64, mimeType: mime, prompt })
+  if (doubaoRes.ok && doubaoRes.content) {
+    text = doubaoRes.content
+  } else if (currentProvider().vision) {
+    // 主力模型有视觉才走它兜底；DeepSeek 这类没有视觉模型的提供商跳过（识别靠豆包）
+    const r = await chatRaw(
+      [
+        { role: 'system', content: '你是渔具店的入库录单员。用户拍了一张送货单/进货单的照片，你要把单据上的商品逐行识别出来。只输出 JSON，不要 markdown 代码块，不要任何解释文字。' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+      { model: currentProvider().vision, maxTokens: 1200 },
+    )
+    if (!r.ok) return r
+    text = r.message.content?.trim() ?? ''
+  } else {
+    return { ok: false, reason: doubaoRes.reason || '识别失败' }
+  }
+
   // 模型有时会包一层 ```json，剥掉再解析
   const jsonText = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
   let parsed
@@ -458,9 +537,25 @@ const toolImpls = {
     }
   },
 
-  /** 知识沉淀：AI 发现值得记住的事时自主落库（唯一允许直接写的工具，只写 ai_insights 表） */
-  save_insight({ kind, content } = {}) {
-    const r = saveInsight(db, kind, content)
+  /** 知识检索：按关键词搜知识库，回答"之前记过的"问题时用（不只靠注入的固定切片） */
+  search_knowledge({ keyword, limit } = {}) {
+    const rows = searchInsights(db, keyword, limit)
+    if (rows.length === 0) return { found: 0, message: '知识库里没搜到相关内容' }
+    return {
+      found: rows.length,
+      results: rows.map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        content: r.content,
+        tags: r.tags,
+        created_at: r.created_at,
+      })),
+    }
+  },
+
+  /** 知识沉淀：AI 发现值得记住的事时自主落库（只写 ai_insights 表）；可带标签方便检索 */
+  save_insight({ kind, content, tags } = {}) {
+    const r = saveInsight(db, kind, content, { tags })
     return r.saved ? { saved: true, note: `已记住（${r.kind}），以后对话会带着这条记忆` } : { error: r.reason }
   },
 }
@@ -571,6 +666,22 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'search_knowledge',
+      description:
+        '按关键词搜索知识库。老板问"以前说过的/记得吗/上次的..."时，先用它搜之前存的知识和记忆，再回答。',
+      parameters: {
+        type: 'object',
+        properties: {
+          keyword: { type: 'string', description: '搜索关键词，如"伊势尼""补货""老李"等' },
+          limit: { type: 'integer', description: '返回条数，默认5' },
+        },
+        required: ['keyword'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'save_insight',
       description:
         '记住一条值得长期记住的事，下次对话还能想起来。' +
@@ -582,6 +693,7 @@ const TOOLS = [
         properties: {
           kind: { type: 'string', enum: ['fact', 'preference', 'suggestion'], description: '记忆类型，默认 fact' },
           content: { type: 'string', description: '要记住的内容，一句话说清，含关键数字' },
+          tags: { type: 'string', description: '标签，逗号分隔，便于检索（如"补货,伊势尼"）' },
         },
         required: ['content'],
       },
@@ -601,7 +713,8 @@ const systemPrompt = () => {
 4. 入库/出库只能调用 draft_ 工具生成草稿（不是真的执行），结尾必须提醒"请核对后点确认按钮"
 5. 回答控制在120字以内，简明扼要，不要emoji
 6. 答不了的就说不知道，并建议用户去哪个页面操作（入库/出库/库存查询/盘点/供应商/导入/设置）
-7. 对话中发现值得长期记住的事（回头客偏好、商品周转规律、老板明确的经营习惯），用 save_insight 工具记下来；给老板经营建议时用 kind='suggestion' 存，便于以后回顾验证${memory ? `\n${memory}` : ''}`
+7. 对话中发现值得长期记住的事（回头客偏好、商品周转规律、老板明确的经营习惯），用 save_insight 工具记下来；给老板经营建议时用 kind='suggestion' 存，便于以后回顾验证
+8. 老板问"之前说的/记得吗/上次的"这类话时，先用 search_knowledge 搜知识库，搜到就引用，别硬编${memory ? `\n${memory}` : ''}`
 }
 
 /** 单条用户消息超长截断，防 token 膨胀（保留前 4000 字） */
@@ -746,4 +859,69 @@ export function aiHistory(limit = 50) {
 export function aiInsights(limit = 50) {
   if (!db) return []
   return listInsights(db, { limit })
+}
+
+// ---------- 语音纠错：ASR 识别不准 → 用店里商品清单纠正 ----------
+// 老板方言/口音下 ASR 常把"伊势尼"听成"意思尼"、"光威"听成"光危"。
+// 这里把识别出的词 + 店里真实商品名交给大模型匹配，返回最可能的正确商品名。
+
+/**
+ * 语音识别纠错：把 ASR 输出的词和店里商品清单比对，纠正成真实商品名
+ * @param {string} rawText ASR 原始识别文本
+ * @returns {Promise<{ok:true, corrected:string, matched:boolean} | {ok:false, reason:string}>}
+ */
+export async function correctSearchTerm(rawText) {
+  if (!db) return { ok: false, reason: 'db-not-ready' }
+  const text = String(rawText ?? '').trim()
+  if (!text) return { ok: false, reason: 'empty' }
+  if (text.length > 50) return { ok: true, corrected: text, matched: false } // 太长不纠，直接用
+
+  // ---------- 语音习惯缓存：老板纠正过一次的（原话→正确）存起来，下次直接命中，越用越懂他 ----------
+  const profileFile = dataDir ? path.join(dataDir, 'voice-profile.json') : null
+  let profile = {}
+  try { if (profileFile && fs.existsSync(profileFile)) profile = JSON.parse(fs.readFileSync(profileFile, 'utf8')) } catch { profile = {} }
+  if (profile[text]) return { ok: true, corrected: profile[text], matched: true, fromCache: true }
+
+  // 取店里商品名（品牌+型号 + SKU），最多 300 个，喂给模型当对照表
+  const rows = db
+    .prepare(
+      `SELECT p.brand, p.model, p.sku_code FROM products p
+       WHERE p.status != '停产' ORDER BY p.id LIMIT 300`,
+    )
+    .all()
+  const productNames = rows.map((r) => [r.brand, r.model].filter(Boolean).join(' ') || r.sku_code || '').filter(Boolean)
+  // 没有商品清单就不纠，原样返回
+  if (productNames.length === 0) return { ok: true, corrected: text, matched: false }
+
+  const r = await chatRaw([
+    {
+      role: 'system',
+      content:
+        '你是渔具店的语音助手。顾客对着麦克风说了一个词（可能是口音/识别错误），你要在店里真实商品清单里找出最可能对应的那个商品。' +
+        '只输出一个商品名，不要解释。如果确实对不上任何商品，原样输出顾客说的词。',
+    },
+    {
+      role: 'user',
+      content: `顾客说的词：${text}\n\n店里商品清单（每行一个）：\n${productNames.join('\n')}`,
+    },
+  ], { maxTokens: 30 })
+  if (!r.ok) return { ok: false, reason: r.reason }
+
+  const corrected = (r.message.content ?? '').trim().replace(/[。，、""]/g, '')
+  // 纠正结果如果还是原词或太离谱，就用原词
+  if (!corrected || corrected.length > 30) return { ok: true, corrected: text, matched: false }
+  const matched = corrected !== text && productNames.some((n) => n === corrected || n.includes(corrected) || corrected.includes(n))
+  // 纠正成功就记住这条映射（下次老板再这么念，直接认出来，不用再调大模型）
+  if (matched && corrected !== text && profileFile) {
+    try {
+      profile[text] = corrected
+      if (Object.keys(profile).length > 500) {
+        // 防无限膨胀：删掉最老的一半
+        const keys = Object.keys(profile)
+        keys.slice(0, Math.floor(keys.length / 2)).forEach((k) => delete profile[k])
+      }
+      fs.writeFileSync(profileFile, JSON.stringify(profile), 'utf8')
+    } catch { /* 缓存写不进不致命 */ }
+  }
+  return { ok: true, corrected, matched }
 }

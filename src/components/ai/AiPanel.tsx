@@ -97,18 +97,26 @@ export function AiPanel() {
     }
   }, [])
 
-  // 唤醒词「小杜小杜」：收到 fi:wake（或挂载时取到待处理唤醒）→ 滚动到面板并自动录音 5 秒
+  // 唤醒词「小杜小杜」：收到 fi:wake（或挂载时取到待处理唤醒）→ 滚动到面板
+  // → 先播一句"在"回应，等它说完再开始录音听问题（老板听到"在"就知道该开口了）
   useEffect(() => {
     const onWake = () => {
       cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
       // AI 未激活（无 Key）时面板只展示，录音函数未定义，直接跳过
       if (!backend || !enabled || recording || thinking || transcribing || micBlocked) return
-      void startRecording()
+      // 先回"在"，播完（约 1.2 秒）再自动录音 5 秒听问题
+      speak('在')
       if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
       wakeTimerRef.current = setTimeout(() => {
         wakeTimerRef.current = null
-        stopRecording()
-      }, 5000)
+        if (recording || thinking || transcribing) return
+        void startRecording()
+        const t = setTimeout(() => {
+          wakeTimerRef.current = null
+          stopRecording()
+        }, 5000)
+        wakeTimerRef.current = t
+      }, 1200)
     }
     window.addEventListener('fi:wake', onWake)
     if (consumePendingWake()) onWake()

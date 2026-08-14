@@ -5,11 +5,13 @@
 // 写接口（POST /api/outbound）加严：独立限流每 IP 30 次/分钟、Content-Type 必须 application/json、
 //           请求体限 8KB、字段白名单严格校验，业务校验与桌面端共用 commands.confirmOutbound
 import http from 'node:http'
+import https from 'node:https'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { ensureTlsCert } from './tls.js'
 
 // ESM 无 __dirname，这里补一个（serveMobile 托管 electron/mobile/ 用）
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -683,14 +685,22 @@ if (deepBarcode) {
  *   db 注入业务库连接（照 commands.js 模式）；dataDir 用于存 token 与开关配置
  */
 let aiRef = null // v1.15: main.js 注入 ai 模块引用，供 ai:photoDraft 桥接
-export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, webRoot = null, ai = null }) {
+let voiceRef = null // v2.4: main.js 注入 voice 模块引用，供手机端本地离线语音识别
+let doubaoRef = null // v2.5: main.js 注入 doubao 模块引用，供手机端豆包视觉/ASR
+export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, webRoot = null, ai = null, voice = null, doubao = null }) {
   if (ai) aiRef = ai
+  if (voice) voiceRef = voice
+  if (doubao) doubaoRef = doubao
   const tokenPath = path.join(dataDir, 'server-token.txt')
   const configPath = path.join(dataDir, 'server-config.json')
   // 商品图片只读出口：/api/photo?path=<相对文件名>，路径校验与桌面端 fi-img 协议共用 photo.js
   const photoStore = createPhotoStore(path.join(dataDir, 'images'))
   let server = null
   let port = null
+  // HTTPS 服务（v2.8）：手机浏览器要麦克风/摄像头必须走 HTTPS，这里起一个加密服务给语音识别用
+  let httpsServer = null
+  let httpsPort = null
+  let tlsReady = false
   let token = null
   let lastError = null
   // 速率限制：ip → 最近一分钟内的请求时间戳
@@ -922,6 +932,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     'product:update': (d, p) => cmds.updateProduct(d, p.id, p),
     'product:batchUpdate': (d, p) => cmds.batchUpdateProducts(d, p),
     'product:delete': (d, p) => cmds.deleteProduct(d, p.id, p.operator ?? null),
+    'product:mark': (d, p) => cmds.markProduct(d, p),
     'product:expiring': (d, p) => cmds.expiringProducts(d, p),
     'inbound:create': (d, p) => cmds.createInbound(d, p),
     'outbound:confirm': (d, p) => cmds.confirmOutbound(d, p),
@@ -945,6 +956,21 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     'expense:create': (d, p) => cmds.createExpense(d, p),
     'expense:update': (d, p) => cmds.updateExpense(d, p),
     'expense:delete': (d, p) => cmds.deleteExpense(d, p),
+    // ---- 手机端补全（v2.1.10）：报损 / 配节（与桌面端同一套 commands，业务校验一致） ----
+    'waste:create': (d, p) => cmds.createWaste(d, p),
+    'waste:list': (d, p) => cmds.listWastes(d, p ?? {}),
+    'waste:summary': (d, p) => cmds.wasteSummary(d, p ?? {}),
+    'part:set': (d, p) => cmds.setPart(d, p),
+    'part:setMany': (d, p) => cmds.setPartsMany(d, p),
+    'part:list': (d, p) => cmds.partsOf(d, p ?? {}),
+    'part:all': (d, p) => cmds.allParts(d, p ?? {}),
+    'kit:list': (d) => cmds.listKits(d),
+    'kit:get': (d, p) => cmds.getKit(d, p ?? {}),
+    'kit:save': (d, p) => cmds.saveKit(d, p),
+    'kit:delete': (d, p) => cmds.deleteKit(d, p ?? {}),
+    'receipt:register': (d, p) => cmds.registerReceipt(d, p ?? {}),
+    'receipt:list': (d, p) => cmds.listReceipts(d, p ?? {}),
+    'receipt:reconcile': (d, p) => cmds.reconcileReceipt(d, p ?? {}),
     'po:create': (d, p) => cmds.createPurchaseOrder(d, p),
     'po:list': (d, p) => cmds.listPurchaseOrders(d, p),
     'po:detail': (d, p) => cmds.purchaseOrderDetail(d, p),
@@ -956,6 +982,17 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     'audit:list': (d, p) => cmds.auditLog(d, p),
     'supplier:statement': (d, p) => cmds.supplierStatement(d, p),
     // 商品图片：与桌面端主进程同款——写盘返回相对文件名 / 删文件+清 photo_path
+    // 收款码：手机端开单选微信/支付宝时，读电脑上配好的收款码图展示给顾客扫
+    'payment:getQr': (d) => {
+      const readQr = (name) => {
+        try {
+          const p = path.join(dataDir, 'payment-qr', name)
+          if (fs.existsSync(p)) return `data:image/jpeg;base64,${fs.readFileSync(p).toString('base64')}`
+        } catch { /* 当没配置 */ }
+        return null
+      }
+      return { wx: readQr('wx.jpg'), ali: readQr('ali.jpg') }
+    },
     'photo:save': (d, p) => ({ ok: true, path: photoStore.save(p?.productId, p?.base64, p?.ext ?? 'jpg') }),
     'photo:delete': (d, p) => {
       photoStore.remove(p?.productId)
@@ -973,6 +1010,19 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
          LIMIT 20`
       ).all(kw, kw, like, like, like)
     },
+    // 库存列表：keyword 空 = 全部商品（带总库存），非空 = 过滤；手机库存页"打开就看全部SKU"用
+    'product:list': (d, p) => {
+      const kw = String(p?.keyword ?? '').trim()
+      const limit = Math.min(parseInt(p?.limit, 10) || 300, 1000)
+      const base = `SELECT p.*, COALESCE((SELECT SUM(b2.quantity) FROM inventory_batches b2 WHERE b2.product_id = p.id),0) AS total_stock
+         FROM products p`
+      if (kw) {
+        const like = `%${kw}%`
+        return d.prepare(`${base} WHERE p.sku_code = ? OR p.barcode = ? OR p.brand LIKE ? OR p.model LIKE ? OR p.sku_code LIKE ? ORDER BY p.category, p.brand, p.model LIMIT ?`)
+          .all(kw, kw, like, like, like, limit)
+      }
+      return d.prepare(`${base} ORDER BY p.category, p.brand, p.model LIMIT ?`).all(limit)
+    },
     'report:today': (d) => {
       const rev = d.prepare(
         `SELECT COALESCE(SUM((CASE WHEN t.type='return' THEN -1 ELSE 1 END) * t.selling_price * t.quantity),0) FROM transactions t WHERE t.notes!='换货退旧' AND date(t.timestamp,'localtime')=date('now','localtime')`
@@ -985,9 +1035,9 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
         `SELECT COUNT(*) AS n FROM (SELECT COUNT(*) FROM transactions t WHERE t.type='out' AND date(t.timestamp,'localtime')=date('now','localtime') GROUP BY t.id)`
       ).get()
       const recent = d.prepare(
-        `SELECT t.type, t.quantity, t.selling_price, t.unit_price, t.timestamp, t.operator, t.notes, p.brand, p.model, p.sku_code
+        `SELECT t.type, t.quantity, t.selling_price, t.unit_price, t.timestamp, t.operator, t.notes, t.pay_method, p.brand, p.model, p.sku_code
          FROM transactions t JOIN products p ON p.id = t.product_id
-         WHERE date(t.timestamp,'localtime') = date('now','localtime') ORDER BY t.timestamp DESC LIMIT 50`
+         WHERE date(t.timestamp,'localtime') = date('now','localtime') ORDER BY t.timestamp DESC LIMIT 80`
       ).all()
       const receivable = d.prepare(
         `SELECT COALESCE(SUM(owed - paid),0) FROM (SELECT c.id, COALESCE((SELECT SUM(selling_price*quantity) FROM transactions WHERE customer_id=c.id),0) AS owed, COALESCE((SELECT SUM(paid_amount) FROM transactions WHERE customer_id=c.id),0) AS paid FROM customers c)`
@@ -1008,7 +1058,7 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     'report:hotSellers': (d, p) => {
       const days = Math.min(Math.max(parseInt(p?.days, 10) || 30, 1), 90)
       return d.prepare(
-        `SELECT p.id, p.brand, p.model, p.sku_code, p.suggest_price, p.photo_path, p.updated_at,
+        `SELECT p.id, p.brand, p.model, p.sku_code, p.suggest_price, p.photo_path, p.updated_at, p.unit,
                 SUM(t.quantity) AS qty,
                 SUM(t.selling_price * t.quantity) AS revenue
          FROM transactions t JOIN products p ON p.id = t.product_id
@@ -1026,9 +1076,66 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     },
     'ai:photoDraft': async (d, p) => {
       if (!aiRef || !p?.imageBase64) return { ok: false, reason: 'no-key-or-image' }
+      // v3.0 每日额度（普通20/进阶100/大师不限）
+      const quota = cmds.checkAiQuota(d, 'vision')
+      if (!quota.allow) return { ok: false, reason: quota.message }
       try {
         const r = await aiRef.parseInboundNote({ imageBase64: p.imageBase64, mimeType: p.mimeType || 'image/jpeg' })
+        if (r?.ok) cmds.recordAiUsage(d, 'vision')
         return r
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    // 手机端 AI 功能：状态 / 一句话日报 / 对话助手（与桌面端同一套 ai.js 逻辑）
+    'ai:status': (d) => aiRef ? aiRef.aiStatus() : { configured: false },
+    'ai:dailySummary': async (d, p) => {
+      if (!aiRef) return { ok: false, reason: 'ai-not-ready' }
+      try {
+        return await aiRef.dailySummary(p?.stats ?? {})
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    'ai:chat': async (d, p) => {
+      if (!aiRef) return { ok: false, reason: 'ai-not-ready' }
+      try {
+        // p.messages = [{role, content}]，返回 { ok, content, drafts, trace }
+        return await aiRef.agentChat(Array.isArray(p?.messages) ? p.messages : [])
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    // 语音纠错：ASR 识别不准 → 用店里商品清单纠正成真实商品名（手机端语音搜索用）
+    'ai:correctTerm': async (d, p) => {
+      if (!aiRef || !p?.text) return { ok: false, reason: 'no-text' }
+      try {
+        return await aiRef.correctSearchTerm(p.text)
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    // 语音识别：本地离线（voice:transcribe，PC sherpa-onnx）+ 云端兜底（ai:transcribe，webm base64）
+    'voice:status': (d) => voiceRef ? voiceRef.voiceStatus() : { ready: false },
+    'voice:transcribe': async (d, p) => {
+      if (!voiceRef || !Array.isArray(p?.pcm)) return { ok: false, reason: 'no-pcm' }
+      try {
+        // 把店里商品名（品牌+型号）拼成热词传进去，让识别器优先认商品名——口音识别不准时偏向商品
+        const hotRows = d.prepare(
+          `SELECT brand, model FROM products WHERE status != '停产' ORDER BY id LIMIT 500`,
+        ).all()
+        const hotwords = hotRows
+          .map((r) => [r.brand, r.model].filter(Boolean).join(' ').trim())
+          .filter(Boolean)
+          .join(' ')
+          .slice(0, 500) // 热词串过长反而拖慢，截断
+        return await voiceRef.transcribePcm({ pcm: p.pcm, sampleRate: p.sampleRate || 16000, hotwords })
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    'ai:transcribe': async (d, p) => {
+      if (!aiRef || !p?.audioBase64) return { ok: false, reason: 'no-audio' }
+      try {
+        // 手机端 webm base64 → 云端 ASR（本地模型没下载时的兜底）
+        return await aiRef.transcribeAudio({ audioBase64: p.audioBase64, mimeType: p.mimeType || 'audio/webm' })
+      } catch (e) { return { ok: false, reason: e.message } }
+    },
+    // 豆包语音转文字（火山方舟 doubao-asr-default）：本地小模型识别差时的云端增强
+    'doubao:transcribe': async (d, p) => {
+      if (!doubaoRef || !p?.audioBase64) return { ok: false, reason: 'no-audio' }
+      try {
+        return await doubaoRef.doubaoASR({ audioBase64: p.audioBase64, mimeType: p.mimeType || 'audio/webm' })
       } catch (e) { return { ok: false, reason: e.message } }
     },
   }
@@ -1212,23 +1319,22 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
   }
 
   /** 端口被占用时 +1 重试，最多 10 次；basePort=0 由系统分配（测试用） */
-  function tryListen(p, attemptsLeft) {
+  function tryListen(p, attemptsLeft, secure = false) {
     return new Promise((resolve, reject) => {
-      const s = http.createServer((req, res) => {
-        Promise.resolve()
-          .then(() => handle(req, res))
-          .catch((e) => {
-            console.error('[server] 请求处理异常:', e)
-            try {
-              sendJson(res, 500, { error: 'internal error' })
-            } catch {
-              // 连接已断开等情况，忽略
-            }
-          })
-      })
+      const create = () => {
+        if (secure) {
+          const { ok, cert, key } = ensureTlsCert(dataDir, lanIp())
+          if (!ok) { tlsReady = false; return null }
+          tlsReady = true
+          return https.createServer({ cert: fs.readFileSync(cert), key: fs.readFileSync(key) }, handler)
+        }
+        return http.createServer(handler)
+      }
+      const s = create()
+      if (!s) { reject(new Error('证书生成失败，HTTPS 不可用')); return }
       s.once('error', (e) => {
         if (e.code === 'EADDRINUSE' && attemptsLeft > 0 && p !== 0) {
-          resolve(tryListen(p + 1, attemptsLeft - 1))
+          resolve(tryListen(p + 1, attemptsLeft - 1, secure))
         } else {
           reject(e)
         }
@@ -1240,6 +1346,20 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
     })
   }
 
+  // 统一请求处理（http/https 共用）
+  const handler = (req, res) => {
+    Promise.resolve()
+      .then(() => handle(req, res))
+      .catch((e) => {
+        console.error('[server] 请求处理异常:', e)
+        try {
+          sendJson(res, 500, { error: 'internal error' })
+        } catch {
+          // 连接已断开等情况，忽略
+        }
+      })
+  }
+
   async function start() {
     if (server) return status()
     if (!loadConfig().enabled) return status()
@@ -1248,6 +1368,17 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
       const r = await tryListen(basePort, MAX_PORT_RETRY - 1)
       server = r.server
       port = r.port
+      // HTTPS 服务（语音/摄像头必需）：在 HTTP 端口+1 上起；失败只告警不阻断 HTTP 看店
+      try {
+        const rh = await tryListen(basePort + 1, MAX_PORT_RETRY - 1, true)
+        httpsServer = rh.server
+        httpsPort = rh.port
+        console.log(`[server] 手机看店(HTTPS)已启动：https://${lanIp()}:${httpsPort}`)
+      } catch (e) {
+        httpsServer = null
+        httpsPort = null
+        console.warn('[server] HTTPS 启动失败（语音需 HTTPS，HTTP 看店不受影响）:', e.message)
+      }
       lastError = null
       console.log(`[server] 手机看店服务已启动：http://${lanIp()}:${port}`)
     } catch (e) {
@@ -1258,6 +1389,11 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
   }
 
   async function stop() {
+    if (httpsServer) {
+      try { await new Promise((r) => httpsServer.close(r)) } catch {}
+      httpsServer = null
+      httpsPort = null
+    }
     if (!server) return status()
     const s = server
     server = null
@@ -1275,14 +1411,19 @@ export function createInventoryServer({ db, dataDir, basePort = DEFAULT_PORT, we
   function status() {
     const enabled = loadConfig().enabled
     const running = server !== null
+    const ip = lanIp()
     return {
       enabled,
       running,
       port: running ? port : null,
-      ip: lanIp(),
-      url: running ? `http://${lanIp()}:${port}/?token=${token}` : null,
+      ip,
+      // 优先 HTTPS（语音/摄像头要用）；HTTPS 不可用时退回 HTTP
+      url: running && httpsPort ? `https://${ip}:${httpsPort}/?token=${token}` : running ? `http://${ip}:${port}/?token=${token}` : null,
+      httpUrl: running ? `http://${ip}:${port}/?token=${token}` : null,
+      httpsPort: running ? httpsPort : null,
+      httpsEnabled: running && !!httpsPort,
       // 整机共享：其他电脑/平板浏览器用这个网址开全功能系统
-      appUrl: running && webRoot ? `http://${lanIp()}:${port}/app?token=${token}` : null,
+      appUrl: running && webRoot ? (httpsPort ? `https://${ip}:${httpsPort}/app?token=${token}` : `http://${ip}:${port}/app?token=${token}`) : null,
       error: lastError,
     }
   }

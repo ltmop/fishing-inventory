@@ -40,6 +40,15 @@ export const SPEC_PLACEHOLDERS: Record<SpecField, string> = {
   expiry_date: '如：2027-06',
 }
 
+// 保质期必填的品类（v2.2）：饵料/小药/活饵/路亚假饵入库必须填该批次的到期日，
+// 否则批次保质期管理白搭。与 specFieldsFor 返回 expiry_date 的那组保持一致。
+export const EXPIRY_REQUIRED_CATEGORIES: Category[] = ['饵料', '小药', '活饵', '路亚假饵']
+
+/** 该品类是否入库必填到期日（饵料/小药/活饵/路亚假饵） */
+export function requiresExpiry(category: Category | string | null | undefined): boolean {
+  return category != null && (EXPIRY_REQUIRED_CATEGORIES as string[]).includes(category)
+}
+
 /** 品类 → 表单该显示的规格字段（全部选填）；未列出的品类只给通用的颜色/材质 */
 export function specFieldsFor(category: Category | string): SpecField[] {
   switch (category) {

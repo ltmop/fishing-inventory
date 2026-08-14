@@ -14,10 +14,14 @@ import {
   ScrollText,
   Settings,
   Wallet,
+  ReceiptText,
   PackageX,
   Link2,
+  PackageOpen,
   PanelLeftClose,
   PanelLeftOpen,
+  Brain,
+  HelpCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { APP_VERSION } from '@/lib/version'
@@ -33,14 +37,18 @@ const ADMIN_ITEMS = [
   { to: '/', label: '仪表盘', icon: LayoutDashboard, end: true },
   { to: '/reports', label: '经营报表', icon: BarChart3 },
   { to: '/expenses', label: '支出记账', icon: Wallet },
+  { to: '/receipt-reconcile', label: '收款对账', icon: ReceiptText },
   { to: '/waste', label: '报损登记', icon: PackageX },
   { to: '/parts', label: '配节管理', icon: Link2 },
+  { to: '/kits', label: '套装管理', icon: PackageOpen },
   { to: '/purchase', label: '采购订货', icon: ClipboardList },
   { to: '/stock-take', label: '盘点管理', icon: ClipboardCheck },
   { to: '/customers', label: '客户', icon: Users },
   { to: '/suppliers', label: '供应商', icon: Factory },
   { to: '/import', label: '批量导入', icon: FileUp },
   { to: '/audit', label: '操作日志', icon: ScrollText },
+  { to: '/knowledge', label: '知识库', icon: Brain },
+  { to: '/help', label: '帮助中心', icon: HelpCircle },
   { to: '/settings', label: '设置', icon: Settings },
 ]
 

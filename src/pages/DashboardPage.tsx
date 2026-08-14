@@ -64,6 +64,7 @@ export function DashboardPage() {
   const products = useAppStore((s) => s.products)
   const batches = useAppStore((s) => s.batches)
   const transactions = useAppStore((s) => s.transactions)
+  const expenses = useAppStore((s) => s.expenses)
   const totalStockOf = useAppStore((s) => s.totalStockOf)
   const purchaseOrders = useAppStore((s) => s.purchaseOrders)
   const loadPurchaseOrders = useAppStore((s) => s.loadPurchaseOrders)
@@ -178,6 +179,31 @@ export function DashboardPage() {
     [transactions],
   )
 
+  // 本月经营：老板最关心的"这个月赚了多少"——营业额/毛利/支出/净利
+  const monthStats = useMemo(() => {
+    const now = new Date()
+    const mStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+    const mEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString()
+    let revenue = 0
+    let profit = 0
+    for (const t of transactions) {
+      if (t.timestamp < mStart || t.timestamp >= mEnd) continue
+      if (t.type === 'out') {
+        if (t.selling_price != null) revenue += t.selling_price * t.quantity
+        if (t.selling_price != null && t.unit_price != null) profit += (t.selling_price - t.unit_price) * t.quantity
+      } else if (t.type === 'return' && t.notes !== '换货退旧') {
+        if (t.selling_price != null) revenue -= t.selling_price * t.quantity
+        if (t.selling_price != null && t.unit_price != null) profit -= (t.selling_price - t.unit_price) * t.quantity
+      }
+    }
+    // 本月支出（expenses 按 expense_date 本地日期记）
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const expense = expenses
+      .filter((e) => (e.expense_date || '').startsWith(monthKey))
+      .reduce((s, e) => s + e.amount, 0)
+    return { revenue, profit, expense, netProfit: profit - expense }
+  }, [transactions, expenses])
+
   // AI 一句话打烊日报：仅在已配置 Key 且有成交时请求；失败静默隐藏，数字报表兜底
   const [aiConfigured, setAiConfigured] = useState(false)
   const [aiText, setAiText] = useState<string | null>(null)
@@ -284,6 +310,10 @@ export function DashboardPage() {
     { title: '库存总值', value: stats.stockValue, format: (v) => formatPrice(Math.round(v)), unit: '按批次进价核算', icon: CircleDollarSign,
       cardClass: 'bg-brand-700 dark:bg-gradient-to-br dark:from-gold-500 dark:to-gold-600', iconClass: 'bg-gradient-to-br from-white/25 to-white/10 text-white ring-1 ring-white/20', numClass: 'text-white dark:text-[#0a1628]', featured: true,
       action: () => navigate('/inventory'), actionHint: '查看' },
+    // 本月赚了多少：个体户最关心的一眼数字（毛利-支出）
+    { title: '本月净利', value: monthStats.netProfit, format: (v) => formatPrice(Math.round(v)), unit: `毛利 ${formatPrice(monthStats.profit)} · 支出 ${formatPrice(monthStats.expense)}`, icon: CircleDollarSign,
+      cardClass: 'bg-gradient-to-br from-emerald-600 to-teal-600 dark:from-gold-500 dark:to-gold-600', iconClass: 'bg-white/20 text-white ring-1 ring-white/20', numClass: 'text-white dark:text-[#0a1628]', featured: true,
+      action: () => navigate('/reports'), actionHint: '看明细' },
   ]
 
   return (
@@ -316,6 +346,26 @@ export function DashboardPage() {
           </span>
           <span className="ml-auto font-medium">去收货 →</span>
         </Link>
+      )}
+
+      {/* 临期/滞销主动提醒：这批货快过期了 / 压着钱没动，主动催老板处理 */}
+      {(expiringCount > 0 || stats.slowCount > 0) && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-5 py-3.5 text-sm text-red-800">
+          {expiringCount > 0 && (
+            <Link to="/inventory?filter=expiring" className="flex items-center gap-2 hover:underline">
+              <CalendarClock className="size-5 shrink-0" />
+              <span><span className="font-bold">{expiredCount > 0 ? `${expiredCount} 个已过期` : `${expiringCount} 个快过期`}</span>，饵料/小药别放过期了</span>
+              <span className="ml-1 font-medium">去处理 →</span>
+            </Link>
+          )}
+          {stats.slowCount > 0 && (
+            <Link to="/inventory" className="flex items-center gap-2 hover:underline">
+              <Snail className="size-5 shrink-0" />
+              <span><span className="font-bold">{stats.slowCount} 个</span>超{SLOW_DAYS}天没卖动，压着钱该处理了</span>
+              <span className="ml-1 font-medium">看看 →</span>
+            </Link>
+          )}
+        </div>
       )}
 
       {/* 经营建议：该补货了 / 该清仓了（头号王牌，放今日小结之前） */}

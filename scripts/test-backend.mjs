@@ -519,7 +519,7 @@ ok('preload 白名单含 ai:transcribe', preloadSrc.includes("'ai:transcribe'"))
 // 模型目录：优先 spike/models（开发机本地副本），否则用 %APPDATA% 应用数据目录里的已下载模型（只读不写）。
 // 两处都没有时真实转写用例跳过并打印（CI 无模型场景）；下载逻辑不做真实网络测试（见末尾说明）
 import * as voice from '../electron/voice.js'
-import { checkModel, ensureModel, MODEL_NAME } from '../electron/modelManager.js'
+import { checkModel, ensureModel, MODEL_NAME, MODEL_FILES } from '../electron/modelManager.js'
 import { createRequire } from 'node:module'
 const require2 = createRequire(import.meta.url)
 const appdataModels = path.join(
@@ -552,10 +552,8 @@ fs.writeFileSync(path.join(badModelDir, 'model.int8.onnx'), Buffer.alloc(100))
 const cm3 = checkModel(badModelDir)
 ok('模型校验：文件大小不符判未就绪', cm3.ready === false && cm3.missing.length === 2)
 // 大小正确的假文件应通过校验（说明校验的是字节数而非内容，与 ensureModel 的断点续下逻辑一致）
-for (const { file, bytes } of [
-  { file: 'model.int8.onnx', bytes: 81828675 },
-  { file: 'tokens.txt', bytes: 75352 },
-]) {
+// 直接用 MODEL_FILES 的实际字节数（从 modelManager.js 读取，模型升级后测试不用改）
+for (const { file, bytes } of MODEL_FILES) {
   fs.writeFileSync(path.join(badModelDir, file), Buffer.alloc(bytes))
 }
 ok('模型校验：字节数正确即判就绪', checkModel(badModelDir).ready === true)
@@ -789,13 +787,13 @@ if (checkKwsModel(spikeKwsDir).ready && checkTtsModel(spikeTtsDir).ready) {
   fs.writeFileSync(errLog, Array.from({ length: 30 }, (_, i) => `[line ${i + 1}] some error`).join('\n'))
   fb.initFeedback({ logFile: errLog, version: '1.1.0' })
   const rBadScheme = await fb.sendFeedback({ webhook: 'http://example.com/hook', message: '测试' })
-  ok('非 https 接收地址被拒绝', rBadScheme.ok === false)
+  ok('非 https 接收地址降级为本地记录（全版本开放）', rBadScheme.ok === true && rBadScheme.note)
   const rEmpty = await fb.sendFeedback({ webhook: 'https://open.feishu.cn/x', message: '  ' })
   ok('空反馈内容被拒绝（未发请求）', rEmpty.ok === false)
   // 日志附带逻辑：文件不存在时静默跳过
   fb.initFeedback({ logFile: path.join(tmp, 'no-such.log'), version: '1.1.0' })
   const rNoLog = await fb.sendFeedback({ webhook: '', message: '测试' })
-  ok('日志文件缺失不影响校验流程', rNoLog.ok === false && rNoLog.reason === '反馈接收地址无效')
+  ok('无 webhook 也本地记录成功', rNoLog.ok === true && rNoLog.note)
 }
 
 // 18. 手机看店服务（electron/server.js）：无 Electron 依赖，真实 HTTP 请求打临时端口实例
@@ -819,7 +817,9 @@ import { createInventoryServer } from '../electron/server.js'
   const base = `http://127.0.0.1:${st.port}`
   const token = fs.readFileSync(path.join(srvDir, 'server-token.txt'), 'utf8').trim()
   ok('首次启动生成 32 位十六进制 token', /^[0-9a-f]{32}$/.test(token))
-  ok('状态 URL 含 token 与端口', st.url.includes(`token=${token}`) && st.url.includes(`:${st.port}`))
+  // url 现在优先 HTTPS（语音/摄像头需要），端口是 httpsPort；没起成 HTTPS 才回退 HTTP 端口
+  const urlHasPort = (st.httpsEnabled && st.url.includes(`:${st.httpsPort}`)) || (!st.httpsEnabled && st.url.includes(`:${st.port}`))
+  ok('状态 URL 含 token 与端口', st.url.includes(`token=${token}`) && urlHasPort)
 
   // token 鉴权：无 token / 错 token → 401；query / header 两种方式都放行
   const rNoToken = await fetch(`${base}/api/summary`)
@@ -2286,6 +2286,91 @@ ok('preload 白名单含 outbound:checkout', preloadSrc.includes("'outbound:chec
   })
   const invBizErr = await rInvBizErr.json()
   ok('invoke 业务校验错误 400 且中文提示透传', rInvBizErr.status === 400 && typeof invBizErr.error === 'string' && invBizErr.error.includes('售价'))
+
+  // v2.1.10 手机端补全通道：临期 / 报损 / 配节 / 套装 + 热销带 unit（按米卖鱼线依赖）
+  const rExpiring = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'product:expiring', payload: { days: 30 } }),
+  })
+  ok('invoke product:expiring 返回数组', rExpiring.status === 200 && Array.isArray((await rExpiring.json()).result))
+  const rPc2 = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'product:create', payload: { sku_code: '', category: '饵料', cost_price: 200, unit: '件' } }),
+  })
+  const pc2 = await rPc2.json()
+  const pid2 = pc2.result?.id
+  const rIn2 = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'inbound:create', payload: { productId: pid2, quantity: 10, costPrice: 200 } }),
+  })
+  ok('invoke inbound:create 给报损备货', rIn2.status === 200 && (await rIn2.json()).ok === true)
+  const rWaste = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'waste:create', payload: { productId: pid2, quantity: 3, reason: '临期报废', operator: '手机' } }),
+  })
+  const waste = await rWaste.json()
+  ok('invoke waste:create 报损成功', rWaste.status === 200 && waste.ok === true)
+  const rWasteList = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'waste:list', payload: { limit: 10 } }),
+  })
+  const wasteList = await rWasteList.json()
+  ok('invoke waste:list 能看到刚才的报损', rWasteList.status === 200 && Array.isArray(wasteList.result) && wasteList.result.some((w) => w.product_id === pid2))
+  const rPart = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'part:set', payload: { productId: pid2, parentId: invCreate.result.id, partType: '竿梢', operator: '手机' } }),
+  })
+  ok('invoke part:set 设配节', rPart.status === 200 && (await rPart.json()).ok === true)
+  const rPartAll = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'part:all', payload: {} }),
+  })
+  const partAll = await rPartAll.json()
+  ok('invoke part:all 含配节与主竿名', rPartAll.status === 200 && Array.isArray(partAll.result) && partAll.result.some((p) => p.id === pid2 && p.parent_name))
+  const rKit = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'kit:save', payload: { name: '新手绑钩套装', items: [{ productId: pid2, quantity: 2 }] } }),
+  })
+  const kit = await rKit.json()
+  ok('invoke kit:save 建套装', rKit.status === 200 && kit.result?.id > 0)
+  const rKitList = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'kit:list', payload: {} }),
+  })
+  const kitList = await rKitList.json()
+  ok('invoke kit:list 能看到套装', rKitList.status === 200 && Array.isArray(kitList.result) && kitList.result.some((k) => k.id === kit.result?.id))
+  // 热销榜：开一笔真实出库，验证返回项带 unit（手机端按米卖鱼线全靠它判断单位）
+  const rOut2 = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'outbound:checkout', payload: { items: [{ productId: pid2, quantity: 1, sellingPrice: 500 }], method: '现金', operator: '手机' } }),
+  })
+  ok('invoke outbound:checkout 开单成功（热销备数据）', rOut2.status === 200 && (await rOut2.json()).ok === true)
+  const rHot = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'report:hotSellers', payload: { days: 30 } }),
+  })
+  const hot = await rHot.json()
+  ok('invoke report:hotSellers 每项带 unit 字段', rHot.status === 200 && Array.isArray(hot.result) && hot.result.every((p) => 'unit' in p))
+  // 按米卖鱼线（手机端核心场景）：米商品建/入/出全走 invoke，小数开单
+  const rMeter = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'product:create', payload: { sku_code: '', category: '鱼线', cost_price: 800, unit: '米' } }),
+  })
+  const meterProd = await rMeter.json()
+  const meterId = meterProd.result?.id
+  const rMeterIn = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'inbound:create', payload: { productId: meterId, quantity: 100, costPrice: 800 } }),
+  })
+  ok('米商品按米入库成功', rMeterIn.status === 200 && (await rMeterIn.json()).ok === true)
+  const rMeterOut = await fetch(`${aBase}/api/invoke`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-token': aToken },
+    body: JSON.stringify({ channel: 'outbound:checkout', payload: { items: [{ productId: meterId, quantity: 15.5, sellingPrice: 1200 }], payMethod: '现金', operator: '手机' } }),
+  })
+  const meterOut = await rMeterOut.json()
+  ok('米商品按米卖出 15.5 米成功', rMeterOut.status === 200 && meterOut.ok === true)
+  const meterStock = adb.prepare('SELECT COALESCE(SUM(quantity),0) q FROM inventory_batches WHERE product_id = ?').get(meterId).q
+  ok('米商品出库后库存扣减正确（100-15.5=84.5）', Math.abs(meterStock - 84.5) < 1e-9)
   await srvA.stop()
 
   // 不传 webRoot 的实例：/app 404、appUrl 为 null（开发态/未打包环境）

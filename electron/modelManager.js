@@ -136,19 +136,21 @@ export function createModelManager({ files, sources }) {
   return { checkModel, ensureModel }
 }
 
-// ---------- 离线语音识别模型（paraformer-zh-small int8，78MB） ----------
+// ---------- 离线语音识别模型（阿里 SenseVoiceSmall int8，约228MB） ----------
+// 从 paraformer-zh-small（78MB，识别一般）升级到 SenseVoiceSmall：中文普通话/粤语/英语/日语/韩语，
+// 自带标点与语气词过滤，识别渔具品名（伊势尼/光威/赤刃）准确率高一个档次。模型文件从 huggingface
+// csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17 校验，int8 版本 228MB。
 
-export const MODEL_NAME = 'sherpa-onnx-paraformer-zh-small-2024-03-09'
+export const MODEL_NAME = 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17'
 
-// 期望文件与字节数（与 spike 验证过的模型逐字节一致，校验大小即可，不算 hash）
+// 期望文件与字节数（与 huggingface 模型仓库校验一致，校验大小即可，不算 hash）
 export const MODEL_FILES = [
-  { file: 'model.int8.onnx', bytes: 81828675 },
-  { file: 'tokens.txt', bytes: 75352 },
+  { file: 'model.int8.onnx', bytes: 239233841 },
+  { file: 'tokens.txt', bytes: 315894 },
 ]
 
 // 同一模型文件的多源镜像，按顺序尝试。
 // 注意：GitHub release 只发整包 tar.bz2（需要 bzip2 解码器，不值得为此引依赖），
-// modelscope 上没有这个模型的镜像仓库（实测 404），
 // 所以备用源用 huggingface 主站（国内受限时 hf-mirror 已兜底，海外网络反之）。
 const asr = createModelManager({
   files: MODEL_FILES,

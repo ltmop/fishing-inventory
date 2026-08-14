@@ -69,7 +69,7 @@ export function useModelDownload({ statusChannel, downloadChannel, progressSubsc
   return { ready, downloading, percent, error, startDownload }
 }
 
-/** 语音识别模型（sherpa-onnx paraformer-zh-small，约78MB） */
+/** 语音识别模型（阿里 SenseVoiceSmall int8，约228MB，sherpa-onnx 加载） */
 export function useVoiceModel() {
   return useModelDownload({
     statusChannel: 'voice:status',

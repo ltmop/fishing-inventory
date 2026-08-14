@@ -14,7 +14,11 @@ import { CustomersPage } from '@/pages/CustomersPage'
 import { ExpensesPage } from '@/pages/ExpensesPage'
 import { WastePage } from '@/pages/WastePage'
 import { PartsPage } from '@/pages/PartsPage'
+import { ReceiptReconcilePage } from '@/pages/ReceiptReconcilePage'
+import { KitsPage } from '@/pages/KitsPage'
 import { AuditLogPage } from '@/pages/AuditLogPage'
+import { KnowledgePage } from '@/pages/KnowledgePage'
+import { HelpPage } from '@/pages/HelpPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { ImportPage } from '@/pages/ImportPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
@@ -95,6 +99,8 @@ function App() {
         priceTiers: mockPriceTiers,
         expenses: mockExpenses,
         auditLogs: mockAuditLogs,
+        kits: [],
+        kitItems: [],
         loaded: true,
       })
     }
@@ -127,9 +133,13 @@ function App() {
             <Route path="suppliers" element={<SuppliersPage />} />
             <Route path="customers" element={<CustomersPage />} />
             <Route path="expenses" element={<ExpensesPage />} />
+            <Route path="receipt-reconcile" element={<ReceiptReconcilePage />} />
             <Route path="waste" element={<WastePage />} />
             <Route path="parts" element={<PartsPage />} />
+            <Route path="kits" element={<KitsPage />} />
             <Route path="audit" element={<AuditLogPage />} />
+            <Route path="knowledge" element={<KnowledgePage />} />
+            <Route path="help" element={<HelpPage />} />
             <Route path="import" element={<ImportPage />} />
             <Route path="settings" element={<SettingsPage />} />
             <Route path="*" element={<NotFoundPage />} />

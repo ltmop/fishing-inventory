@@ -9,8 +9,9 @@ import { uploadProductPhoto } from '@/lib/photo'
 import { playSound } from '@/lib/sounds'
 import { useOnline } from '@/lib/useOnline'
 import { CATEGORIES, type Category, type Product } from '@/types'
+import { validateQty, unitOf } from '@/lib/quantity'
 import {
-  SPEC_FIELDS, specFieldsFor,
+  SPEC_FIELDS, specFieldsFor, requiresExpiry,
   type SpecField,
 } from '@/lib/productSpecs'
 import { Button } from '@/components/ui/button'
@@ -62,6 +63,8 @@ export function InboundPage() {
   const [barcode, setBarcode] = useState('')
   const [matched, setMatched] = useState<Product | null>(null)
   const [notFound, setNotFound] = useState(false)
+  // 模糊搜索候选（输入商品名不是条码时，多个匹配让老板点选，不误判"新建"）
+  const [candidates, setCandidates] = useState<Product[]>([])
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   // P0-1：所有写库按钮统一防重复 + 失败兜底
@@ -88,6 +91,7 @@ export function InboundPage() {
     suggestYuan: '',
     location: '',
     minStock: '',
+    unit: '件',
     specs: emptySpecs(),
     photoDataUrl: null,
   })
@@ -131,30 +135,69 @@ export function InboundPage() {
     const code = barcode.trim()
     setError('')
     if (!code) return
-    const p = findProductByBarcode(code)
-    if (p) {
+    // 1) 先精确匹配条码（扫码枪扫出来的码走这条路）
+    const exact = findProductByBarcode(code)
+    if (exact) {
       playSound('scan')
-      setMatched(p)
+      setMatched(exact)
       setNotFound(false)
-      prefillForm(p)
-    } else {
-      playSound('error')
-      setMatched(null)
-      setNotFound(true)
+      setCandidates([])
+      prefillForm(exact)
+      return
     }
+    // 2) 没匹配到条码 → 模糊搜品牌/型号/SKU/子类（老板手输商品名也能找到，不误判成"新建"）
+    const kw = code.toLowerCase()
+    const fuzzy = products.filter((p) =>
+      [p.sku_code, p.brand, p.model, p.sub_category, p.barcode]
+        .filter(Boolean)
+        .some((s) => String(s).toLowerCase().includes(kw)),
+    )
+    if (fuzzy.length === 1) {
+      playSound('scan')
+      setMatched(fuzzy[0])
+      setNotFound(false)
+      setCandidates([])
+      prefillForm(fuzzy[0])
+      return
+    }
+    if (fuzzy.length > 1) {
+      // 多个候选 → 让老板点选，而不是直接"新建"
+      setMatched(null)
+      setNotFound(false)
+      setCandidates(fuzzy.slice(0, 8))
+      return
+    }
+    // 3) 真没有 → 才提示新建
+    playSound('error')
+    setMatched(null)
+    setCandidates([])
+    setNotFound(true)
+  }
+
+  const pickCandidate = (p: Product) => {
+    setMatched(p)
+    setNotFound(false)
+    setCandidates([])
+    prefillForm(p)
   }
 
   const handleConfirm = async () => {
     if (!matched || submitting) return
-    const qty = Number(quantity)
-    if (!Number.isInteger(qty) || qty < 1) {
-      setError('入库数量必须是 ≥1 的整数')
+    const qty = validateQty(Number(quantity), unitOf(matched))
+    if (qty === null) {
+      setError(unitOf(matched) === '米' ? '入库数量要大于 0，且最多 1 位小数' : '入库数量必须是 ≥1 的整数')
       playSound('error')
       return
     }
     const cost = yuanToCents(costYuan)
     if (cost === null) {
       setError('进价格式不正确')
+      playSound('error')
+      return
+    }
+    // 保质期商品（饵料/小药/活饵/路亚假饵）必须填该批次的到期日，否则临期预警白搭
+    if (requiresExpiry(matched.category) && !expiryDate.trim()) {
+      setError(`${productName(matched)} 是保质期商品，必须填该批次的到期日`)
       playSound('error')
       return
     }
@@ -187,6 +230,7 @@ export function InboundPage() {
   const handleCancel = () => {
     setMatched(null)
     setNotFound(false)
+    setCandidates([])
     setError('')
     focusInput()
   }
@@ -233,6 +277,7 @@ export function InboundPage() {
         location: npForm.location.trim() || null,
         status: '待盘点',
         min_stock: minStock,
+        unit: npForm.unit,
         // 只提交当前品类展示的规格字段，避免切换品类后残留旧值混进来
         ...Object.fromEntries(
           specFieldsFor(npForm.category).map((f) => [f, npForm.specs[f].trim() || null]),
@@ -291,6 +336,7 @@ export function InboundPage() {
           category: it.category ?? '其他',
           quantity: it.quantity,
           costYuan: it.cost_price_fen ? (it.cost_price_fen / 100).toFixed(2) : '',
+          expiryDate: '',
         })),
       )
     } catch {
@@ -321,6 +367,11 @@ export function InboundPage() {
         fails.push(`${label}：数量无效`)
         continue
       }
+      // 保质期商品（饵料/小药/活饵/路亚假饵）必须填该批次到期日
+      if (requiresExpiry(it.category) && !it.expiryDate.trim()) {
+        fails.push(`${label}：保质期商品必须填到期日`)
+        continue
+      }
       try {
         let pid = it.product_id
         if (!pid) {
@@ -345,6 +396,7 @@ export function InboundPage() {
           location: null,
           supplierId: null,
           operator,
+          expiryDate: it.expiryDate.trim() || undefined,
         })
         okCount++
       } catch (err) {
@@ -417,6 +469,46 @@ export function InboundPage() {
       {success && <SuccessBanner>{success}</SuccessBanner>}
       {error && <ErrorBanner>{error}</ErrorBanner>}
 
+      {/* 模糊搜索候选：输入商品名（不是条码）时，多个匹配让老板点选，不误判"新建" */}
+      {candidates.length > 0 && (
+        <Card className="gap-0 overflow-hidden py-0">
+          <div className="h-1.5 bg-gradient-to-r from-brand-400 to-brand-500" />
+          <CardContent className="py-4">
+            <div className="mb-3 text-sm font-medium text-slate-600">
+              找到 <span className="font-bold text-brand-600">{candidates.length}</span> 个商品，点一个选择：
+            </div>
+            <div className="max-h-64 space-y-1.5 overflow-y-auto">
+              {candidates.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => pickCandidate(c)}
+                  className="flex w-full items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-sm transition-colors hover:border-brand-300 hover:bg-brand-50"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{productName(c)}</div>
+                    <div className="text-xs text-slate-400">
+                      {c.sku_code} · {c.category}
+                      {c.sub_category ? ` / ${c.sub_category}` : ''}
+                    </div>
+                  </div>
+                  <span className="ml-2 shrink-0 text-xs text-slate-400">
+                    库存 {totalStockOf(c.id)} 件
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 flex gap-3">
+              <Button variant="outline" size="sm" onClick={() => setDialogOpen(true)}>
+                都不是，新建商品
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleCancel}>
+                取消
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* 搜索结果：已匹配商品 —— 全站第二重要界面，视觉升舱 */}
       {matched && (
         <MatchedProductCard
@@ -437,6 +529,7 @@ export function InboundPage() {
           onOperatorChange={setOperator}
           expiryDate={expiryDate}
           onExpiryDateChange={setExpiryDate}
+          expiryRequired={requiresExpiry(matched.category)}
           submitting={submitting}
           onConfirm={handleConfirm}
           onOpenCreate={() => setDialogOpen(true)}

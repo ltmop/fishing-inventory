@@ -47,7 +47,12 @@ export function preloadRecognizer() {
     recognizer = new sherpa.OfflineRecognizer({
       featConfig: { sampleRate: 16000, featureDim: 80 },
       modelConfig: {
-        paraformer: { model: path.join(modelDir, 'model.int8.onnx') },
+        // 阿里 SenseVoiceSmall：中文识别更准，自带标点/语气词过滤
+        senseVoice: {
+          model: path.join(modelDir, 'model.int8.onnx'),
+          language: 'zh',
+          useInverseTextNormalization: true,
+        },
         tokens: path.join(modelDir, 'tokens.txt'),
         numThreads: 2,
         provider: 'cpu',
@@ -64,11 +69,12 @@ export function preloadRecognizer() {
 
 /**
  * 16kHz 单声道 PCM → 文字
- * @param {{ pcm: Float32Array | ArrayBuffer | Uint8Array | number[], sampleRate?: number }} payload
+ * @param {{ pcm: Float32Array | ArrayBuffer | Uint8Array | number[], sampleRate?: number, hotwords?: string }} payload
  *   pcm 为 32 位浮点采样（渲染端 OfflineAudioContext 重采样产物）；IPC 传过来一般是 Buffer/Uint8Array
+ *   hotwords 为空格分隔的词（如店里商品名），让识别器优先认出它们——老板说"伊势尼"带口音也偏向认成商品名
  * @returns {{ok:true, text:string, ms:number} | {ok:false, reason:string}}
  */
-export function transcribePcm({ pcm, sampleRate = 16000 } = {}) {
+export function transcribePcm({ pcm, sampleRate = 16000, hotwords = '' } = {}) {
   const loaded = preloadRecognizer()
   if (!loaded.ok) return loaded
 
@@ -90,7 +96,9 @@ export function transcribePcm({ pcm, sampleRate = 16000 } = {}) {
   if (samples.length > sampleRate * 60) return { ok: false, reason: '录音太长了，请控制在 60 秒以内' }
 
   try {
-    const stream = recognizer.createStream()
+    // 热词偏置：把店里商品名传进去，识别时优先往这些词上靠（对带口音的商品名识别有效）
+    const hw = typeof hotwords === 'string' && hotwords.trim() ? hotwords.trim() : undefined
+    const stream = hw ? recognizer.createStream(hw) : recognizer.createStream()
     const t0 = Date.now()
     stream.acceptWaveform({ sampleRate, samples })
     recognizer.decode(stream)

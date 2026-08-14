@@ -9,6 +9,8 @@ import path from 'node:path'
 
 const API_URL = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
 const MODEL = 'doubao-seed-2-1-turbo-260628'
+// 视觉识别用 pro 版：进货单/商品图识别品牌、规格更准（turbo 快但细节差）
+const VISION_MODEL = 'doubao-seed-2-1-pro-260628'
 const TIMEOUT_MS = 45_000
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024 // 5MB
 
@@ -104,7 +106,7 @@ export async function analyzeImage({ imagePath, prompt } = {}) {
 
   try {
     const body = {
-      model: MODEL,
+      model: VISION_MODEL,
       messages: [{
         role: 'user',
         content: [
@@ -112,7 +114,7 @@ export async function analyzeImage({ imagePath, prompt } = {}) {
           { type: 'text', text: String(prompt ?? '描述这张图片的内容') },
         ],
       }],
-      max_tokens: 1200,
+      max_tokens: 1500,
     }
 
     const res = await fetch(API_URL, {
@@ -140,6 +142,101 @@ export async function analyzeImage({ imagePath, prompt } = {}) {
       reason: e?.name === 'AbortError' ? 'timeout' : 'network',
       detail: String(e),
     }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 豆包视觉分析（base64 直接传入）：手机端/进货单等场景图片已经是 base64，不再走文件路径。
+ * @param {{ imageBase64: string, mimeType?: string, prompt?: string }} params
+ * @returns {Promise<{ok:true, content:string} | {ok:false, reason:string, detail?:string}>}
+ */
+export async function analyzeImageBase64({ imageBase64, mimeType = 'image/jpeg', prompt = '描述这张图片的内容' } = {}) {
+  const key = readApiKey()
+  if (!key) return { ok: false, reason: 'no-key', detail: '请先在设置页配置豆包视觉模型的 API Key' }
+  if (!imageBase64 || typeof imageBase64 !== 'string') return { ok: false, reason: 'no-image' }
+  if (imageBase64.length > 20_000_000) {
+    return { ok: false, reason: 'image-too-large', detail: '图片 base64 编码后过大，请压缩' }
+  }
+  const mime = /^image\/(jpeg|png|webp|gif|bmp)$/.test(mimeType) ? mimeType : 'image/jpeg'
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+
+  try {
+    const body = {
+      model: VISION_MODEL,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
+          { type: 'text', text: String(prompt ?? '') },
+        ],
+      }],
+      max_tokens: 2500, // 进货单行数多时要够输出，防止截断
+    }
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      return { ok: false, reason: `http-${res.status}`, detail: detail.slice(0, 300) }
+    }
+    const data = await res.json()
+    const content = data.choices?.[0]?.message?.content?.trim()
+    return content ? { ok: true, content } : { ok: false, reason: 'empty-response' }
+  } catch (e) {
+    return { ok: false, reason: e?.name === 'AbortError' ? 'timeout' : 'network', detail: String(e) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 语音识别（火山方舟 OpenAI 兼容转录端点）：本地小模型识别差时的云端增强，失败静默降级
+const ASR_URL = 'https://ark.cn-beijing.volces.com/api/v3/audio/transcriptions'
+const ASR_MODEL = 'doubao-asr-default'
+const ASR_MIME_EXT = { 'audio/webm': 'webm', 'audio/wav': 'wav', 'audio/mp3': 'mp3', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg' }
+
+/**
+ * 豆包语音转文字：base64 音频 → 文字（火山方舟 doubao-asr-default）
+ * @param {{ audioBase64: string, mimeType?: string }} params
+ * @returns {Promise<{ok:true, text:string} | {ok:false, reason:string}>}
+ */
+export async function doubaoASR({ audioBase64, mimeType = 'audio/webm' } = {}) {
+  const key = readApiKey()
+  if (!key) return { ok: false, reason: 'no-key' }
+  if (!audioBase64 || typeof audioBase64 !== 'string') return { ok: false, reason: 'no-audio' }
+  if (audioBase64.length > 20_000_000) return { ok: false, reason: 'audio-too-large' }
+  const buf = Buffer.from(audioBase64, 'base64')
+  if (buf.length === 0) return { ok: false, reason: 'empty-audio' }
+  const mime = ASR_MIME_EXT[mimeType] ? mimeType : 'audio/webm'
+  const ext = ASR_MIME_EXT[mime]
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const form = new FormData()
+    form.append('file', new Blob([buf], { type: mime }), `voice.${ext}`)
+    form.append('model', ASR_MODEL)
+    const res = await fetch(ASR_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      return { ok: false, reason: `http-${res.status}`, detail: detail.slice(0, 200) }
+    }
+    const data = await res.json()
+    const text = data.text?.trim()
+    return text ? { ok: true, text } : { ok: false, reason: 'empty' }
+  } catch (e) {
+    return { ok: false, reason: e?.name === 'AbortError' ? 'timeout' : 'network', detail: String(e) }
   } finally {
     clearTimeout(timer)
   }

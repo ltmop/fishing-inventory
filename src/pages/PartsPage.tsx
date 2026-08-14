@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Fish, Link2, Plus, PackageX } from 'lucide-react'
+import { CheckSquare, Fish, Link2, Plus, PackageX, Square } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { backend } from '@/lib/api'
 import { productName } from '@/lib/formatters'
@@ -26,24 +26,33 @@ interface PartRow {
   model: string | null
   part_type: string | null
   stock: number
+  /** 缺货线（v2.2）：每件商品自己的安全库存，NULL=默认 5 */
+  min_stock: number | null
 }
 
 const PART_TYPES = ['竿梢', '手把节', '中节', '后堵', '其他']
+// 没单独设缺货线的配节按默认阈值 5 预警（与全站 LOW_STOCK_THRESHOLD 一致）
+const DEFAULT_THRESHOLD = 5
 
-/** 配节管理：主竿-配节关联，断竿梢换节看库存 */
+/** 配节管理：主竿-配节关联，断竿梢换节看库存；缺货线每根竿自己定，可批量绑配节 */
 export function PartsPage() {
   const products = useAppStore((s) => s.products)
+  const updateProduct = useAppStore((s) => s.updateProduct)
+
   const [parentKw, setParentKw] = useState('')
   const [parentId, setParentId] = useState<number | null>(null)
   const [parent, setParent] = useState<Product | null>(null)
   const [parts, setParts] = useState<PartRow[]>([])
 
+  // 批量绑定：搜索勾选多个商品 + 统一配节类型
   const [addKw, setAddKw] = useState('')
-  const [addProductId, setAddProductId] = useState<number | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [partType, setPartType] = useState('竿梢')
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [busy, setBusy] = useState(false)
+  // 行内改缺货线的本地暂存（partId → 输入值）
+  const [thresholdDrafts, setThresholdDrafts] = useState<Record<number, string>>({})
 
   const loadParts = (pid: number) => {
     if (!backend) return
@@ -58,29 +67,45 @@ export function PartsPage() {
     : []
 
   const addMatches = addKw.trim()
-    ? products.filter((p) => p.id !== parentId && [p.sku_code, p.brand, p.model].filter(Boolean).join(' ').toLowerCase().includes(addKw.trim().toLowerCase())).slice(0, 8)
+    ? products.filter(
+        (p) =>
+          p.id !== parentId &&
+          !selectedIds.has(p.id) &&
+          [p.sku_code, p.brand, p.model].filter(Boolean).join(' ').toLowerCase().includes(addKw.trim().toLowerCase()),
+      ).slice(0, 12)
     : []
 
   const handlePickParent = (p: Product) => {
     setParentId(p.id)
     setParent(p)
     setParentKw(productName(p))
+    setSelectedIds(new Set())
     setError('')
     setSuccess('')
   }
 
-  const handleAddPart = async () => {
-    if (!parentId || !addProductId || busy || !backend) return
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleBatchAdd = async () => {
+    if (!parentId || selectedIds.size === 0 || busy || !backend) return
     setBusy(true)
     setError('')
     try {
-      await backend.invoke('part:set', { productId: addProductId, parentId, partType, operator: '阿东' })
-      setSuccess(`已设「${productName(products.find((p) => p.id === addProductId)!)}」为${productName(parent!)}的${partType}`)
+      const partsPayload = [...selectedIds].map((pid) => ({ productId: pid, partType }))
+      const r = await backend.invoke('part:setMany', { parentId, parts: partsPayload, operator: '阿东' })
+      setSuccess(`已把 ${r?.count ?? partsPayload.length} 个商品设为${productName(parent!)}的${partType}`)
+      setSelectedIds(new Set())
       setAddKw('')
-      setAddProductId(null)
       loadParts(parentId)
     } catch (e) {
-      setError(`设置失败：${e instanceof Error ? e.message : String(e)}`)
+      setError(`批量设置失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(false)
     }
@@ -101,9 +126,31 @@ export function PartsPage() {
     }
   }
 
+  // 行内改缺货线：输入留本地，失焦/回车才落库（避免每次击键都刷新表格）
+  const commitThreshold = async (p: PartRow) => {
+    const raw = thresholdDrafts[p.id]?.trim() ?? ''
+    let minStock: number | null = null
+    if (raw !== '') {
+      const n = Number(raw)
+      if (!Number.isInteger(n) || n < 0) {
+        setError('缺货线要是 0 或更大的整数（不想单独设就清空）')
+        setThresholdDrafts((d) => ({ ...d, [p.id]: String(p.min_stock ?? '') }))
+        return
+      }
+      minStock = n
+    }
+    if ((p.min_stock ?? null) === minStock) return
+    try {
+      await updateProduct(p.id, { min_stock: minStock })
+      if (parentId) loadParts(parentId)
+    } catch (e) {
+      setError(`改缺货线失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   return (
     <div className="space-y-6">
-      <PageHeader title="配节管理" subtitle="断竿梢换节是售后刚需——按主竿看各配节库存，缺货早备" />
+      <PageHeader title="配节管理" subtitle="断竿梢换节是售后刚需——按主竿看各配节库存，缺货线每根竿自己定" />
 
       {success && <SuccessBanner>{success}</SuccessBanner>}
       {error && <ErrorBanner>{error}</ErrorBanner>}
@@ -153,7 +200,7 @@ export function PartsPage() {
             </CardHeader>
             <CardContent>
               {parts.length === 0 ? (
-                <EmptyState compact title="这个主竿还没登记配节" desc="下面的表单可以把它店里的竿梢/手把节关联到这个主竿" />
+                <EmptyState compact title="这个主竿还没登记配节" desc="下面的表单可以一次勾选多个竿梢/手把节批量绑到这个主竿" />
               ) : (
                 <div className="max-h-[360px] overflow-auto rounded-md border">
                   <Table>
@@ -161,13 +208,16 @@ export function PartsPage() {
                       <TableRow>
                         <TableHead>配节类型</TableHead>
                         <TableHead>商品</TableHead>
-                        <TableHead className="text-right">库存</TableHead>
+                        <TableHead className="text-right">库存 / 缺货线</TableHead>
+                        <TableHead className="w-24 text-right">改缺货线</TableHead>
                         <TableHead className="text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {parts.map((p) => {
-                        const low = p.stock < 3
+                        const threshold = p.min_stock ?? DEFAULT_THRESHOLD
+                        const low = p.stock < threshold
+                        const draft = thresholdDrafts[p.id] ?? ''
                         return (
                           <TableRow key={p.id}>
                             <TableCell>
@@ -178,7 +228,21 @@ export function PartsPage() {
                               <span className="ml-2 font-mono text-xs text-muted-foreground">{p.sku_code}</span>
                             </TableCell>
                             <TableCell className={`text-right font-medium ${low ? 'text-red-600' : ''}`}>
-                              {p.stock}{low && ' 缺货'}
+                              {p.stock} / {threshold}{low && ' 缺货'}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Input
+                                type="number"
+                                min={0}
+                                placeholder={`${DEFAULT_THRESHOLD}`}
+                                value={draft}
+                                onChange={(e) =>
+                                  setThresholdDrafts((d) => ({ ...d, [p.id]: e.target.value }))
+                                }
+                                onBlur={() => commitThreshold(p)}
+                                onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                                className="ml-auto h-8 w-20 text-right"
+                              />
                             </TableCell>
                             <TableCell className="text-right">
                               <button onClick={() => handleRemovePart(p)} className="text-xs text-slate-400 hover:text-red-500 cursor-pointer">解除</button>
@@ -193,32 +257,44 @@ export function PartsPage() {
             </CardContent>
           </Card>
 
-          {/* 添加配节 */}
+          {/* 批量添加配节 */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 <Plus className="size-5 text-brand-500" />
-                添加配节
+                批量添加配节
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <Label>搜索要设为配节的商品（竿梢/手把节等）</Label>
-                <Input value={addKw} onChange={(e) => { setAddKw(e.target.value); setAddProductId(null) }} placeholder="输入竿梢/手把节的名称或 SKU..." className="mt-1" />
-                {addKw && !addProductId && addMatches.length > 0 && (
+                <Label>搜索要设为配节的商品（可勾选多个，一次绑好）</Label>
+                <Input value={addKw} onChange={(e) => { setAddKw(e.target.value); setError('') }} placeholder="输入竿梢/手把节的名称或 SKU，勾选后批量绑定..." className="mt-1" />
+                {addKw && addMatches.length > 0 && (
                   <div className="mt-2 max-h-40 overflow-auto rounded-md border">
                     {addMatches.map((p) => (
-                      <button key={p.id} onClick={() => { setAddProductId(p.id); setAddKw(productName(p)) }} className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer">
-                        <span>{productName(p)}</span>
+                      <button
+                        key={p.id}
+                        onClick={() => toggleSelect(p.id)}
+                        className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2">
+                          <span className="text-brand-500">
+                            {selectedIds.has(p.id) ? <CheckSquare className="size-4" /> : <Square className="size-4" />}
+                          </span>
+                          {productName(p)}
+                        </span>
                         <span className="text-xs text-slate-400">{p.sku_code}</span>
                       </button>
                     ))}
                   </div>
                 )}
+                {addKw && addMatches.length === 0 && (
+                  <p className="mt-2 text-xs text-slate-400">没找到符合条件的商品</p>
+                )}
               </div>
               <div className="flex items-end gap-3">
                 <div className="flex-1">
-                  <Label>配节类型</Label>
+                  <Label>配节类型（这次勾选的全部设成这个）</Label>
                   <select
                     value={partType}
                     onChange={(e) => setPartType(e.target.value)}
@@ -227,9 +303,9 @@ export function PartsPage() {
                     {PART_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
-                <Button onClick={handleAddPart} disabled={!addProductId || busy}>
+                <Button onClick={handleBatchAdd} disabled={selectedIds.size === 0 || busy}>
                   <PackageX className="size-4" />
-                  设为配节
+                  {busy ? '绑定中...' : `批量设为配节（已选 ${selectedIds.size}）`}
                 </Button>
               </div>
             </CardContent>

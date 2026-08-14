@@ -4,7 +4,7 @@ import * as Sentry from '@sentry/electron/main'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { openDatabase, finalCheckpoint } from './db.js'
+import { openDatabase, finalCheckpoint, listInsights, saveInsight, updateInsight, deleteInsight } from './db.js'
 import * as commands from './commands.js'
 import * as ai from './ai.js'
 import * as doubao from './doubao.js'
@@ -19,7 +19,7 @@ import * as feedback from './feedback.js'
 import { createInventoryServer } from './server.js'
 import { createPhotoStore } from './photo.js'
 import { initAutoUpdater, checkForUpdates, downloadAndInstall } from './updater.js'
-import { loadLicense, activateLicense, machineFingerprint } from './license.js'
+import { loadLicense, activateLicense, machineFingerprint, saveLevelToDb, quotaStatus, planFor, readLevelFromDb } from './license.js'
 import { initCloud, pairWithCloud, syncSnapshot, uploadBackup, listCloudBackups, restoreFromCloud, regenViewLink, getCloudState, stopScheduler as stopCloudScheduler, exitSnapshot as exitCloudSnapshot } from './cloud.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -40,6 +40,35 @@ if (!app.requestSingleInstanceLock()) {
 const dataDir = path.join(app.getPath('appData'), 'fishing-inventory')
 const dbPath = path.join(dataDir, 'data.db')
 const backupDir = path.join(dataDir, 'backup')
+// 崩溃日志：主进程漏网异常/渲染进程崩溃的留痕文件（与 backup-error.log 平级）
+const crashLogPath = path.join(dataDir, 'crash.log')
+/** 写一行崩溃日志（失败静默，不干扰主流程） */
+function logCrash(label, err) {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true })
+    const line = `[${new Date().toISOString()}] ${label}: ${err?.stack || err?.message || String(err)}\n`
+    fs.appendFileSync(crashLogPath, line)
+  } catch { /* 日志写不进去就算了 */ }
+}
+// 主进程兜底保险：任何漏网的同步/异步异常都留痕 + 提示，绝不无声闪退
+// 注意：这是"最后一道保险"，业务层 try/catch 照常做；这里只保证不崩
+process.on('uncaughtException', (err) => {
+  logCrash('uncaughtException', err)
+  // 弹窗告知（主窗口在就挂主窗口，不在就系统级提示）
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: '程序遇到问题',
+        message: '程序遇到一个意外错误，已记录到崩溃日志，不会影响你的数据。',
+        detail: `错误信息：${err?.message ?? err}\n日志位置：${crashLogPath}`,
+      })
+    } catch { /* 弹窗失败忽略 */ }
+  }
+})
+process.on('unhandledRejection', (reason) => {
+  logCrash('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason)))
+})
 // 第二备份位置配置（U 盘/网盘目录）：{ extraDir }，见 backup.js
 const backupConfigPath = path.join(dataDir, 'backup-config.json')
 const getExtraDir = () => loadBackupConfig(backupConfigPath).extraDir
@@ -122,6 +151,7 @@ function registerIpc() {
   handle('product:update', (d, p) => commands.updateProduct(d, p.id, p))
   handle('product:batchUpdate', (d, p) => commands.batchUpdateProducts(d, p))
   handle('product:delete', (d, p) => commands.deleteProduct(d, p.id, p.operator ?? null))
+  handle('product:mark', (d, p) => commands.markProduct(d, p))
   handle('product:expiring', (d, p) => commands.expiringProducts(d, p))
   handle('inbound:create', (d, p) => commands.createInbound(d, p))
   handle('outbound:confirm', (d, p) => commands.confirmOutbound(d, p))
@@ -151,10 +181,20 @@ function registerIpc() {
   handle('waste:create', (d, p) => commands.createWaste(d, p))
   handle('waste:list', (d, p) => commands.listWastes(d, p ?? {}))
   handle('waste:summary', (d, p) => commands.wasteSummary(d, p ?? {}))
-  // 配节管理：设配节关系 / 查主竿配节 / 查所有配节
+  // 配节管理：设配节关系 / 查主竿配节 / 查所有配节 / 批量设配节
   handle('part:set', (d, p) => commands.setPart(d, p))
+  handle('part:setMany', (d, p) => commands.setPartsMany(d, p))
   handle('part:list', (d, p) => commands.partsOf(d, p ?? {}))
   handle('part:all', (d, p) => commands.allParts(d, p ?? {}))
+  // 套装（v2.2）：列表/详情/保存/删除
+  handle('kit:list', (d) => commands.listKits(d))
+  handle('kit:get', (d, p) => commands.getKit(d, p ?? {}))
+  handle('kit:save', (d, p) => commands.saveKit(d, p))
+  handle('kit:delete', (d, p) => commands.deleteKit(d, p ?? {}))
+  // 收款对账（v3.0）：登记实收 / 查登记 / 日结对账
+  handle('receipt:register', (d, p) => commands.registerReceipt(d, p ?? {}))
+  handle('receipt:list', (d, p) => commands.listReceipts(d, p ?? {}))
+  handle('receipt:reconcile', (d, p) => commands.reconcileReceipt(d, p ?? {}))
   // 采购订单：建单/列表/详情/收货入库/取消
   handle('po:create', (d, p) => commands.createPurchaseOrder(d, p))
   handle('po:list', (d, p) => commands.listPurchaseOrders(d, p))
@@ -197,6 +237,34 @@ function registerIpc() {
     commands.updateProduct(db, p?.productId, { photo_path: null })
     return { ok: true }
   })
+  // 收款码：微信/支付宝收款码图片（个体户柜台贴的码），存 dataDir/payment-qr/{wx,ali}.jpg
+  // 手机端开单选微信/支付宝时展示给顾客扫，解决"手机记了账但钱没实时对账"的问题
+  const paymentQrDir = path.join(dataDir, 'payment-qr')
+  ipcMain.handle('payment:getQr', () => {
+    const readQr = (name) => {
+      try {
+        const p = path.join(paymentQrDir, name)
+        if (fs.existsSync(p)) return `data:image/jpeg;base64,${fs.readFileSync(p).toString('base64')}`
+      } catch { /* 读不到当没配置 */ }
+      return null
+    }
+    return { wx: readQr('wx.jpg'), ali: readQr('ali.jpg') }
+  })
+  ipcMain.handle('payment:saveQr', (_e, p) => {
+    const name = p?.type === 'wx' ? 'wx.jpg' : p?.type === 'ali' ? 'ali.jpg' : null
+    if (!name || !p?.base64) return { ok: false, error: '参数不对' }
+    try {
+      fs.mkdirSync(paymentQrDir, { recursive: true })
+      fs.writeFileSync(path.join(paymentQrDir, name), Buffer.from(String(p.base64).split(',')[1] || p.base64, 'base64'))
+      return { ok: true }
+    } catch (e) { return { ok: false, error: e.message } }
+  })
+  ipcMain.handle('payment:deleteQr', (_e, p) => {
+    const name = p?.type === 'wx' ? 'wx.jpg' : p?.type === 'ali' ? 'ali.jpg' : null
+    if (!name) return { ok: false }
+    try { fs.rmSync(path.join(paymentQrDir, name), { force: true }) } catch {}
+    return { ok: true }
+  })
   // 从备份恢复：选文件 → 二次确认 → 覆盖 data.db → 重启应用让新库生效
   ipcMain.handle('backup:restore', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -232,12 +300,29 @@ function registerIpc() {
   })
   // AI 助手（BYOK，Kimi）：密钥管理与一句话日报，全部失败静默降级
   handle('ai:status', () => ai.aiStatus())
+  handle('ai:providers', () => ai.aiProviders())
+  handle('ai:setProvider', (d, p) => ai.setProvider(p.provider))
   handle('ai:setKey', (d, p) => ai.setApiKey(p.key))
   handle('ai:clearKey', () => ai.clearApiKey())
   handle('ai:test', () => ai.testConnection())
   handle('ai:dailySummary', (d, p) => ai.dailySummary(p.stats ?? p))
-  handle('ai:chat', (d, p) => ai.agentChat(p.messages ?? []))
-  handle('ai:parseInboundNote', (d, p) => ai.parseInboundNote(p))
+  // AI 助手对话（v3.0 版本门控）：进阶版及以上可用；普通版保留语音识别/拍照识别/打烊日报等基础 AI
+  handle('ai:chat', (d, p) => {
+    const lv = readLevelFromDb(db)
+    if (lv === 'free') {
+      return { ok: false, reason: 'AI 助手对话为进阶版及以上功能。语音识别、拍照识别、打烊日报等基础 AI 仍免费开放。' }
+    }
+    return ai.agentChat(p.messages ?? [])
+  })
+  // AI 视觉识别（拍照识别进货单）：v3.0 每日额度控制（普通20/进阶100/大师不限）
+  handle('ai:parseInboundNote', async (d, p) => {
+    const quota = commands.checkAiQuota(db, 'vision')
+    if (!quota.allow) return { ok: false, reason: quota.message }
+    const r = await ai.parseInboundNote(p)
+    if (r?.ok) commands.recordAiUsage(db, 'vision')
+    return r
+  })
+  handle('ai:quota', () => commands.aiQuotaStatus(db, 'vision'))
   handle('ai:transcribe', (d, p) => ai.transcribeAudio(p))
   // 豆包视觉模型 2.1：分析店面照片 → 区位布局 / 货架品类识别
   handle('doubao:status', () => doubao.doubaoStatus())
@@ -287,6 +372,11 @@ function registerIpc() {
   })
     handle('ai:history', (d, p) => ai.aiHistory(p.limit ?? 50))
   handle('ai:insights', (d, p) => ai.aiInsights(p.limit ?? 50))
+  // 知识库管理（ai_insights 表 CRUD）：查看/搜索/新增/编辑/删除
+  handle('knowledge:list', (d, p) => listInsights(d, p ?? {}))
+  handle('knowledge:save', (d, p) => saveInsight(d, p.kind, p.content, { tags: p.tags ?? null, source: '手动' }))
+  handle('knowledge:update', (d, p) => updateInsight(d, p.id, p))
+  handle('knowledge:delete', (d, p) => deleteInsight(d, p.id))
   // 外部链接（如 Kimi 开放平台）用系统浏览器打开，仅放行 https
   ipcMain.handle('app:openExternal', (_e, url) => {
     if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url)
@@ -296,6 +386,7 @@ function registerIpc() {
   feedback.initFeedback({
     logFile: path.join(app.getPath('userData'), 'backup-error.log'),
     version: app.getVersion(),
+    feedbackDir: dataDir,
   })
   handle('feedback:send', (d, p) => feedback.sendFeedback(p))
   // 手机看店：局域网只读服务的状态/开关/换 token（inventoryServer 在 app ready 后创建）
@@ -311,16 +402,28 @@ function registerIpc() {
   ipcMain.handle('update:downloadAndInstall', async () => {
     try { await downloadAndInstall() } catch (e) { throw new Error(e?.message ?? '下载失败') }
   })
-  // 授权通道：状态查询 / 激活码验证
+  // 授权通道：状态查询 / 激活码验证 / 配额状态
   ipcMain.handle('license:status', () => {
-    try { return loadLicense(dataDir) } catch { return { activated: false, level: 'free', expiresAt: null, machineId: machineFingerprint(), daysLeft: null } }
+    try {
+      const lic = loadLicense(dataDir)
+      if (db) saveLevelToDb(db, lic.activated ? lic.level : 'free')
+      return lic
+    } catch { return { activated: false, level: 'free', expiresAt: null, machineId: machineFingerprint(), daysLeft: null } }
   })
   ipcMain.handle('license:activate', (_e, p) => {
     try {
       const r = activateLicense(dataDir, p?.code ?? '')
+      if (r.ok && db) saveLevelToDb(db, r.license.level)
       return r.ok ? { ok: true, license: r.license } : { ok: false, error: r.error }
     } catch (e) {
       return { ok: false, error: e.message }
+    }
+  })
+  ipcMain.handle('license:quota', () => {
+    try {
+      return db ? quotaStatus(db, dataDir) : { level: 'free', plan: planFor('free'), usage: { sku: 0, stores: 1, users: 1 }, maxedOut: { sku: false, stores: false, users: false } }
+    } catch {
+      return { level: 'free', plan: planFor('free'), usage: { sku: 0, stores: 1, users: 1 }, maxedOut: { sku: false, stores: false, users: false } }
     }
   })
   // 新手引导通道
@@ -405,6 +508,27 @@ function createWindow() {
     const isLocal = url.startsWith('file://') || (devUrl && url.startsWith(devUrl))
     if (!isLocal) event.preventDefault()
   })
+  // 渲染进程崩溃兜底：检测到崩溃/白屏 → 写日志 + 自动重载页面恢复，不让用户手动重启
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    logCrash('render-process-gone', new Error(`reason=${details?.reason} exitCode=${details?.exitCode}`))
+    // 自动重新加载页面（内存不足/进程被杀等场景恢复）
+    setTimeout(() => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.reload()
+        }
+      } catch { /* 重载失败忽略，用户可手动重启 */ }
+    }, 500)
+  })
+  // 页面加载失败（如磁盘满/资源损坏）也自动重载一次
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    logCrash('did-fail-load', new Error(`code=${code} desc=${desc}`))
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.reload()
+      }
+    } catch { /* 忽略 */ }
+  })
 
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl) {
@@ -467,7 +591,7 @@ app.whenReady().then(() => {
   ai.bindDb(db)
   registerIpc()
   // 手机看店服务：db 就绪后随备份调度一起启动；失败只告警不阻断桌面端
-  inventoryServer = createInventoryServer({ db, dataDir, webRoot: path.join(__dirname, '../dist'), ai })
+  inventoryServer = createInventoryServer({ db, dataDir, webRoot: path.join(__dirname, '../dist'), ai, voice, doubao })
   inventoryServer.start().catch((e) => console.error('[server] 启动失败:', e))
   const stopScheduler = scheduleDailyBackup(db, dbPath, backupDir, (e) =>
     reportBackupError('自动备份失败', e),
@@ -477,12 +601,7 @@ app.whenReady().then(() => {
   try { initAutoUpdater() } catch { /* 挂了是手动更新，不是打不开 */ }
   // 云备份：try/catch 包裹——挂了是本地单机版，不是打不开
   try {
-    initCloud(db, dbPath, dataDir, backupDir, () => {
-      try {
-        const lic = loadLicense(dataDir)
-        return lic.activated && lic.level === 'pro' && (lic.daysLeft === null || lic.daysLeft > 0)
-      } catch { return false }
-    })
+    initCloud(db, dbPath, dataDir, backupDir, () => true)
   } catch { /* 云挂了不影响本地用 */ }
   // 模型已就绪则在启动时预加载识别器（约 1s），首次按住说话零等待；模型缺失静默跳过
   voice.preloadRecognizer()

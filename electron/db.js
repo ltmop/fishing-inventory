@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS products (
     photo_path TEXT,
     name_vi TEXT,
     status TEXT DEFAULT '待盘点' CHECK (status IN ('待盘点','已盘点','已上架虾皮','已售罄','停产')),
+    -- 计量单位（v2.2）：件=整数按个卖（默认）；米=鱼线按长度小数卖
+    unit TEXT DEFAULT '件',
+    -- 手动标记（v2.9）：热销=老板手动标"卖得好/推荐"；处理货=清仓甩卖（POS 显示徽章提示）
+    is_hot INTEGER DEFAULT 0,
+    is_clearance INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -71,6 +76,8 @@ CREATE TABLE IF NOT EXISTS customers (
     notes TEXT,
     -- 客户绑定价格档（可空，NULL=零售默认；老库由 migrateCustomerPriceLevel 补）
     price_level TEXT,
+    -- 老钓友偏好（v2.2）：自由文本
+    preferences TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -88,7 +95,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER NOT NULL REFERENCES products(id),
     batch_id INTEGER REFERENCES inventory_batches(id),
-    type TEXT NOT NULL CHECK (type IN ('in', 'out', 'return', 'exchange')),
+    type TEXT NOT NULL CHECK (type IN ('in', 'out', 'return', 'exchange', 'waste')),
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     unit_price INTEGER,
     selling_price INTEGER,
@@ -203,6 +210,10 @@ CREATE TABLE IF NOT EXISTS ai_insights (
     kind TEXT NOT NULL DEFAULT 'fact',
     content TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
+    -- 知识库扩展（v2.8）：tags 逗号分隔标签、source 来源（对话/手动/导入）、updated_at 更新时间
+    tags TEXT,
+    source TEXT,
+    updated_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -235,11 +246,53 @@ CREATE TABLE IF NOT EXISTS waste_logs (
     product_id INTEGER NOT NULL REFERENCES products(id),
     batch_id INTEGER REFERENCES inventory_batches(id),
     quantity INTEGER NOT NULL CHECK (quantity > 0),
+    -- 报损该批次的进价（v2.2）：哪批报损按哪批的成本算，老数据 NULL 回退商品最近进价
+    cost_price INTEGER,
     reason TEXT NOT NULL DEFAULT '',  -- 报损原因：活饵死亡/饵料临期报废/破损等
     operator TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_waste_logs_created ON waste_logs(created_at);
+
+-- 套装（v2.2）：一套多个商品（新手套装/绑钩套装等），开单时一键加清单
+CREATE TABLE IF NOT EXISTS kits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    -- 打包价（v2.2）：一口价，单位分；NULL=没设，按组成件现价加清单
+    price INTEGER,
+    -- 总折扣（v2.2）：如 90 = 9 折（按组成件现价合计打这个折）；NULL=不设
+    discount_percent INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS kit_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kit_id INTEGER NOT NULL REFERENCES kits(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    UNIQUE(kit_id, product_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kit_items_kit ON kit_items(kit_id);
+
+-- 收款登记（v3.0 收款对账）：每天手动登记 微信/支付宝/现金 实际到账，系统对账
+CREATE TABLE IF NOT EXISTS payment_registers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    register_date TEXT NOT NULL,        -- YYYY-MM-DD
+    method TEXT NOT NULL CHECK (method IN ('现金','微信','支付宝','其他')),
+    amount INTEGER NOT NULL CHECK (amount >= 0),  -- 单位：分
+    operator TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(register_date, method)       -- 每天每方式一条，重复登记覆盖
+);
+
+-- AI 功能每日用量（v3.0）：视觉识别等按版本限每日额度（普通20/进阶100/大师不限）
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    usage_date TEXT NOT NULL,           -- YYYY-MM-DD
+    feature TEXT NOT NULL,              -- 如 'vision'（拍照识别）
+    count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(usage_date, feature)
+);
 `
 
 /**
@@ -259,6 +312,13 @@ function runMigrations(db) {
     ['批次到期日补列', migrateBatchExpiry],
     ['盘点模式补列', migrateStockTakeMode],
     ['配节字段补列', migratePartFields],
+    ['流水表重建加报损类型', migrateTransactionsWasteType],
+    ['报损成本补列', migrateWasteCostPrice],
+    ['商品计量单位补列', migrateProductUnit],
+    ['AI记忆表补列', migrateAiInsights],
+    ['商品标记补列', migrateProductMarks],
+    ['客户偏好补列', migrateCustomerPreferences],
+    ['套装价格补列', migrateKitPrice],
   ]
   const failures = []
   for (const [name, fn] of steps) {
@@ -477,6 +537,95 @@ function migratePartFields(db) {
   if (!cols.includes('part_type')) db.exec('ALTER TABLE products ADD COLUMN part_type TEXT')
 }
 
+// ---------- 流水表重建（v2.2）：transactions 的 type CHECK 加 'waste'，老库重建表 ----------
+// SQLite 无法 ALTER CHECK 约束，只能"建新表→INSERT SELECT→DROP→RENAME"整表迁移。
+// 照抄 migrateOldProductsTable 模式：保留全部列（含赊账 customer_id/paid_amount/pay_method）+ 重建索引。
+function migrateTransactionsWasteType(db) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transactions'").get()
+  if (!row || row.sql.includes("'waste'")) return // 新库/已迁过都跳过
+  db.exec('PRAGMA foreign_keys = OFF')
+  db.exec('BEGIN')
+  try {
+    db.exec(`
+      CREATE TABLE transactions_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          product_id INTEGER NOT NULL REFERENCES products(id),
+          batch_id INTEGER REFERENCES inventory_batches(id),
+          type TEXT NOT NULL CHECK (type IN ('in', 'out', 'return', 'exchange', 'waste')),
+          quantity INTEGER NOT NULL CHECK (quantity > 0),
+          unit_price INTEGER,
+          selling_price INTEGER,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+          operator TEXT,
+          notes TEXT,
+          customer_id INTEGER REFERENCES customers(id),
+          paid_amount INTEGER,
+          pay_method TEXT CHECK (pay_method IN ('现金','微信','支付宝','其他'))
+      );
+      INSERT INTO transactions_new
+        (id, product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount, pay_method)
+      SELECT
+        id, product_id, batch_id, type, quantity, unit_price, selling_price, timestamp, operator, notes, customer_id, paid_amount, pay_method
+      FROM transactions;
+      DROP TABLE transactions;
+      ALTER TABLE transactions_new RENAME TO transactions;
+    `)
+    db.exec('COMMIT')
+  } catch (e) {
+    db.exec('ROLLBACK')
+    db.exec('PRAGMA foreign_keys = ON')
+    throw e
+  }
+  db.exec('PRAGMA foreign_keys = ON')
+  // DROP TABLE 连带删了索引，需重建
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_transactions_product ON transactions(product_id);
+    CREATE INDEX IF NOT EXISTS idx_transactions_batch ON transactions(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_transactions_customer ON transactions(customer_id);
+  `)
+}
+
+// ---------- 报损成本补列（v2.2）：waste_logs 补 cost_price（该批次进价；老数据 NULL=回退商品最近进价） ----------
+function migrateWasteCostPrice(db) {
+  const cols = db.prepare('PRAGMA table_info(waste_logs)').all().map((c) => c.name)
+  if (!cols.includes('cost_price')) db.exec('ALTER TABLE waste_logs ADD COLUMN cost_price INTEGER')
+}
+
+// ---------- 商品计量单位补列（v2.2）：products 补 unit（件/米，默认件） ----------
+function migrateProductUnit(db) {
+  const cols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name)
+  if (!cols.includes('unit')) db.exec("ALTER TABLE products ADD COLUMN unit TEXT DEFAULT '件'")
+}
+
+// ---------- 客户偏好补列（v2.2）：customers 补 preferences（自由文本） ----------
+function migrateCustomerPreferences(db) {
+  const cols = db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name)
+  if (!cols.includes('preferences')) db.exec('ALTER TABLE customers ADD COLUMN preferences TEXT')
+}
+
+// ---------- 套装价格补列（v2.2）：kits 补 price（一口价）+ discount_percent（总折扣） ----------
+function migrateKitPrice(db) {
+  const cols = db.prepare('PRAGMA table_info(kits)').all().map((c) => c.name)
+  if (!cols.includes('price')) db.exec('ALTER TABLE kits ADD COLUMN price INTEGER')
+  if (!cols.includes('discount_percent')) db.exec('ALTER TABLE kits ADD COLUMN discount_percent INTEGER')
+}
+
+// ---------- AI 记忆/知识库补列（v2.8）：ai_insights 补 tags/source/updated_at ----------
+function migrateAiInsights(db) {
+  const cols = db.prepare('PRAGMA table_info(ai_insights)').all().map((c) => c.name)
+  if (!cols.includes('tags')) db.exec('ALTER TABLE ai_insights ADD COLUMN tags TEXT')
+  if (!cols.includes('source')) db.exec('ALTER TABLE ai_insights ADD COLUMN source TEXT')
+  if (!cols.includes('updated_at')) db.exec('ALTER TABLE ai_insights ADD COLUMN updated_at DATETIME')
+}
+
+// ---------- 商品标记补列（v2.9）：products 补 is_hot（热销）/ is_clearance（处理货） ----------
+function migrateProductMarks(db) {
+  const cols = db.prepare('PRAGMA table_info(products)').all().map((c) => c.name)
+  if (!cols.includes('is_hot')) db.exec('ALTER TABLE products ADD COLUMN is_hot INTEGER DEFAULT 0')
+  if (!cols.includes('is_clearance')) db.exec('ALTER TABLE products ADD COLUMN is_clearance INTEGER DEFAULT 0')
+}
+
 /** 软件正常退出时调用一次：收尾 checkpoint，截断 WAL */
 export function finalCheckpoint(db) {
   try {
@@ -505,28 +654,78 @@ export function listAiMessages(db, limit = 50) {
   return rows.reverse()
 }
 
-const INSIGHT_KINDS = new Set(['fact', 'preference', 'suggestion'])
+const INSIGHT_KINDS = new Set(['fact', 'preference', 'suggestion', 'knowledge'])
 
-/** AI 自主沉淀一条知识；kind 不在白名单里按 fact 存 */
-export function saveInsight(db, kind, content) {
+/** AI 自主沉淀一条知识；kind 不在白名单里按 fact 存；tags 逗号分隔、source 标注来源 */
+export function saveInsight(db, kind, content, { tags = null, source = null } = {}) {
   const text = String(content ?? '').trim()
   if (!text) return { saved: false, reason: '内容为空' }
   const k = INSIGHT_KINDS.has(kind) ? kind : 'fact'
-  db.prepare('INSERT INTO ai_insights (kind, content, created_at) VALUES (?, ?, ?)').run(
+  const ts = new Date().toISOString()
+  db.prepare('INSERT INTO ai_insights (kind, content, tags, source, updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
     k,
     text,
-    new Date().toISOString(),
+    tags ? String(tags).slice(0, 200) : null,
+    source ? String(source).slice(0, 50) : null,
+    ts,
+    ts,
   )
   return { saved: true, kind: k }
 }
 
-/** 知识列表查询（ai:insights 通道备用） */
-export function listInsights(db, { limit = 50, activeOnly = false } = {}) {
-  const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500)
-  const rows = activeOnly
-    ? db.prepare('SELECT id, kind, content, created_at, active FROM ai_insights WHERE active = 1 ORDER BY id DESC LIMIT ?').all(n)
-    : db.prepare('SELECT id, kind, content, created_at, active FROM ai_insights ORDER BY id DESC LIMIT ?').all(n)
+/** 知识列表查询（ai:insights 通道备用）；可按 kind/关键词筛选 */
+export function listInsights(db, { limit = 100, activeOnly = false, kind = null, keyword = null } = {}) {
+  const n = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000)
+  const conds = []
+  const params = []
+  if (activeOnly) { conds.push('active = 1') }
+  if (kind && INSIGHT_KINDS.has(kind)) { conds.push('kind = ?'); params.push(kind) }
+  if (keyword) {
+    const like = `%${String(keyword).replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+    conds.push('(content LIKE ? ESCAPE \'\\\' OR tags LIKE ? ESCAPE \'\\\')')
+    params.push(like, like)
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
+  const rows = db.prepare(
+    `SELECT id, kind, content, tags, source, active, updated_at, created_at FROM ai_insights ${where} ORDER BY id DESC LIMIT ?`,
+  ).all(...params, n)
   return rows
+}
+
+/** 知识库关键词搜索（Agent 检索用）：匹配内容/标签，返回 top N */
+export function searchInsights(db, keyword, limit = 5) {
+  const kw = String(keyword ?? '').trim()
+  if (!kw) return []
+  const like = `%${kw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+  return db.prepare(
+    `SELECT id, kind, content, tags, created_at FROM ai_insights
+     WHERE active = 1 AND (content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')
+     ORDER BY id DESC LIMIT ?`,
+  ).all(like, like, Math.min(Math.max(parseInt(limit, 10) || 5, 1), 20))
+}
+
+/** 修改一条知识（内容/类型/标签/停用启用） */
+export function updateInsight(db, id, { kind = null, content = null, tags = null, active = null } = {}) {
+  const cur = db.prepare('SELECT * FROM ai_insights WHERE id = ?').get(id)
+  if (!cur) return { ok: false, reason: '这条知识不存在或已删除' }
+  const text = content != null ? String(content).trim() : cur.content
+  if (!text) return { ok: false, reason: '内容不能为空' }
+  const k = kind != null ? (INSIGHT_KINDS.has(kind) ? kind : cur.kind) : cur.kind
+  db.prepare('UPDATE ai_insights SET kind = ?, content = ?, tags = ?, active = ?, updated_at = ? WHERE id = ?').run(
+    k,
+    text,
+    tags != null ? String(tags).slice(0, 200) : cur.tags,
+    active != null ? (active ? 1 : 0) : cur.active,
+    new Date().toISOString(),
+    id,
+  )
+  return { ok: true }
+}
+
+/** 删除一条知识 */
+export function deleteInsight(db, id) {
+  const r = db.prepare('DELETE FROM ai_insights WHERE id = ?').run(id)
+  return r.changes > 0 ? { ok: true } : { ok: false, reason: '这条知识不存在或已删除' }
 }
 
 const KIND_LABEL = { fact: '事实', preference: '偏好', suggestion: '建议' }

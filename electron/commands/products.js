@@ -11,10 +11,12 @@ import {
   assertPositiveInt,
   PRODUCT_STATUSES,
 } from './helpers.js'
+import { enforceSkuQuota } from '../license.js'
 
 export function createProduct(db, input) {
   const ts = now()
   const minStock = minStockOrNull(input.min_stock)
+  const unit = input.unit === '米' ? '米' : '件'
   // SKU 规则（简化版）：显式传入的原样用（如 CSV 导入、老五段式）；
   // 留空时有条码直接用条码（扫码枪扫出来就是它），无条码用纯数字编号（1001 起递增）
   let skuCode = input.sku_code?.trim()
@@ -26,10 +28,12 @@ export function createProduct(db, input) {
   }
   if (!skuCode) skuCode = nextNumericSku(db)
   return inTransaction(db, () => {
+    // v3.0 SKU 配额：超过当前版本商品上限直接拒绝（普通300/进阶1000/大师无限）
+    enforceSkuQuota(db, 1)
     const info = db
       .prepare(
-        `INSERT INTO products (sku_code, barcode, category, sub_category, brand, model, cost_price, suggest_price, location, status, rod_length, rod_action, power_rating, line_number, hook_size, color, material, expiry_date, min_stock, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO products (sku_code, barcode, category, sub_category, brand, model, cost_price, suggest_price, location, status, rod_length, rod_action, power_rating, line_number, hook_size, color, material, expiry_date, min_stock, unit, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         skuCode,
@@ -44,6 +48,7 @@ export function createProduct(db, input) {
         input.status ?? '待盘点',
         ...SPEC_FIELDS.map((f) => specOrNull(input[f])),
         minStock,
+        unit,
         ts,
         ts,
       )
@@ -60,9 +65,10 @@ export function updateProduct(db, id, input) {
   // 与现有行合并，允许前端只传要改的字段；SKU 创建后不可改
   const v = { ...cur, ...input, id: cur.id, sku_code: cur.sku_code }
   const minStock = minStockOrNull(v.min_stock)
+  const unit = v.unit === '米' ? '米' : '件'
   return inTransaction(db, () => {
     db.prepare(
-      `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, min_stock = ?, photo_path = ?, updated_at = ?
+      `UPDATE products SET category = ?, sub_category = ?, brand = ?, model = ?, cost_price = ?, suggest_price = ?, location = ?, status = ?, rod_length = ?, rod_action = ?, power_rating = ?, line_number = ?, hook_size = ?, color = ?, material = ?, expiry_date = ?, min_stock = ?, unit = ?, photo_path = ?, updated_at = ?
        WHERE id = ?`,
     ).run(
       v.category,
@@ -75,6 +81,7 @@ export function updateProduct(db, id, input) {
       v.status ?? '待盘点',
       ...SPEC_FIELDS.map((f) => specOrNull(v[f])),
       minStock,
+      unit,
       // 图片相对文件名（images 目录内）；与现有行合并，不传 photo_path 时保持原值
       v.photo_path ?? null,
       now(),
@@ -169,4 +176,35 @@ export function batchUpdateProducts(db, { ids, priceMode, status, operator }) {
     }
     return { ok: true, updated: ids.length, tiersUpdated }
   })
+}
+
+/**
+ * 手动标记商品：热销（is_hot）/ 处理货（is_clearance）。手机端老板自己标。
+ * @param {{ id:number, is_hot?:0|1, is_clearance?:0|1, operator?:string }} input
+ */
+export function markProduct(db, { id, is_hot = null, is_clearance = null, operator = null }) {
+  const cur = db.prepare('SELECT * FROM products WHERE id = ?').get(id)
+  if (!cur) throw new Error('商品不存在')
+  const set = []
+  const params = []
+  if (is_hot !== null) {
+    const v = is_hot ? 1 : 0
+    set.push('is_hot = ?')
+    params.push(v)
+    if (cur.is_hot !== v) {
+      logAudit(db, v ? '标热销' : '取消热销', productLabel(cur), { sku: cur.sku_code }, operator)
+    }
+  }
+  if (is_clearance !== null) {
+    const v = is_clearance ? 1 : 0
+    set.push('is_clearance = ?')
+    params.push(v)
+    if (cur.is_clearance !== v) {
+      logAudit(db, v ? '标处理货' : '取消处理货', productLabel(cur), { sku: cur.sku_code }, operator)
+    }
+  }
+  if (set.length === 0) return { ok: true, unchanged: true }
+  params.push(new Date().toISOString(), id)
+  db.prepare(`UPDATE products SET ${set.join(', ')}, updated_at = ? WHERE id = ?`).run(...params)
+  return { ok: true, id, is_hot: is_hot === null ? cur.is_hot : is_hot ? 1 : 0, is_clearance: is_clearance === null ? cur.is_clearance : is_clearance ? 1 : 0 }
 }

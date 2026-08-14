@@ -19,6 +19,8 @@ export interface ReceiptItem {
   name: string
   quantity: number
   unitPrice: number // 单价，单位：分
+  /** 计量单位（v2.2）：件/米，小票数量后面带上 */
+  unit?: '件' | '米'
 }
 
 export interface ReceiptData {
@@ -67,7 +69,7 @@ export function Receipt({ data }: { data: ReceiptData }) {
           <div className="break-all">{it.name}</div>
           <div className="flex justify-between">
             <span>
-              {it.quantity} × {formatPrice(it.unitPrice)}
+              {it.quantity}{it.unit && it.unit !== '件' ? it.unit : ''} × {formatPrice(it.unitPrice)}
             </span>
             <span>{formatPrice(it.quantity * it.unitPrice)}</span>
           </div>
